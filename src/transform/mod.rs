@@ -1,11 +1,13 @@
 use std::{
     cell::SyncUnsafeCell,
-    sync::atomic::{AtomicBool, Ordering},
+    ops::Sub,
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use glam::{Quat, Vec3};
 use parking_lot::Mutex;
 use segvec::SegVec;
+use vulkano::buffer::{BufferWriteGuard, Subbuffer};
 
 pub mod compute;
 
@@ -24,7 +26,7 @@ impl<'a> Transform<'a> {
     fn new(hierarchy: &'a TransformHierarchy, idx: u32) -> Self {
         Self { hierarchy, idx }
     }
-    pub fn lock(&self) -> TransformGuard {
+    pub fn lock(&self) -> TransformGuard<'a> {
         let lock = self.hierarchy.mutexes[self.idx as usize].lock();
         TransformGuard {
             hierarchy: self.hierarchy,
@@ -86,6 +88,8 @@ pub struct TransformHierarchy {
     scales: SegVec<SyncUnsafeCell<Vec3>>,
     metadata: SegVec<TransformMeta>,
     dirty: SegVec<SyncUnsafeCell<u32>>,
+    global_dirty: AtomicBool,
+    // pub buffers: SyncUnsafeCell<*mut TransformBuffers>,
 }
 
 enum TransformComponent {
@@ -93,6 +97,14 @@ enum TransformComponent {
     Rotation,
     Scale,
     Parent,
+}
+
+pub struct _Transform {
+    pub position: Vec3,
+    pub rotation: Quat,
+    pub scale: Vec3,
+    pub name: String,
+    pub parent: Option<u32>,
 }
 
 impl TransformHierarchy {
@@ -104,23 +116,34 @@ impl TransformHierarchy {
             scales: SegVec::new(),
             metadata: SegVec::new(),
             dirty: SegVec::new(),
+            global_dirty: AtomicBool::new(false),
         }
     }
-    pub fn create_transform<'a>(&'a mut self, name: &str) -> Transform<'a> {
+    pub fn len(&self) -> usize {
+        self.mutexes.len()
+    }
+
+    pub fn create_transform<'a>(&'a mut self, t: _Transform) -> Transform<'a> {
         let idx = self.mutexes.len();
         self.mutexes.push(Mutex::new(()));
-        self.positions.push(SyncUnsafeCell::new(Vec3::ZERO));
-        self.rotations.push(SyncUnsafeCell::new(Quat::IDENTITY));
-        self.scales.push(SyncUnsafeCell::new(Vec3::ONE));
+        self.positions.push(SyncUnsafeCell::new(t.position));
+        self.rotations.push(SyncUnsafeCell::new(t.rotation));
+        self.scales.push(SyncUnsafeCell::new(t.scale));
         self.metadata.push(TransformMeta {
-            parent: u32::MAX,
+            parent: t.parent.unwrap_or(u32::MAX),
             children: Vec::new(),
-            name: name.to_string(),
+            name: t.name.to_string(),
         });
-        self.dirty.push(SyncUnsafeCell::new(0b1111));
+        if let Some(parent) = t.parent {
+            self.metadata[parent as usize].children.push(idx as u32);
+        }
+        self.dirty.push(SyncUnsafeCell::new(0b11111));
+
         Transform::new(self, idx as u32)
     }
-    fn mark_dirty(&self, idx: u32, component: TransformComponent) {
+
+    #[inline]
+    fn mark_dirty(&self, t: &TransformGuard, component: TransformComponent) {
         // match component {
         //     TransformComponent::Position => {
         //         self.dirty[idx as usize]
@@ -139,7 +162,14 @@ impl TransformHierarchy {
             TransformComponent::Scale => 1 << 2,
             TransformComponent::Parent => 1 << 3,
         };
-        unsafe { *self.dirty[idx as usize].get() |= flag };
+        unsafe { *self.dirty[t.idx as usize].get() |= flag | (1 << 4) };
+        // if let Some(buffers) = &self.buffers {
+        // let update_flags = unsafe { &mut *self.buffers.update_flags.get() };
+        // let flag_index = t.idx as usize >> 3; // / 8
+        // let bit_index = t.idx as usize & 7; // % 8
+               // update_flags[flag_index].fetch_or(flag << bit_index, Ordering::Relaxed);
+        // }
+        // self.global_dirty.store(true, Ordering::Relaxed);
     }
     fn get_dirty(&self, idx: u32) -> u32 {
         unsafe { *self.dirty[idx as usize].get() }
@@ -167,35 +197,35 @@ impl TransformHierarchy {
     fn scale_by(&self, t: &TransformGuard, scale: Vec3) {
         let s = self._scale(t.idx as u32);
         *s *= scale;
-        self.mark_dirty(t.idx as u32, TransformComponent::Scale);
+        self.mark_dirty(t, TransformComponent::Scale);
     }
     fn set_scale(&self, t: &TransformGuard, scale: Vec3) {
         let s = self._scale(t.idx as u32);
         *s = scale;
-        self.mark_dirty(t.idx as u32, TransformComponent::Scale);
+        self.mark_dirty(t, TransformComponent::Scale);
     }
     fn translate_by(&self, t: &TransformGuard, translation: Vec3) {
         let p = self._position(t.idx as u32);
         let r = self._rotation(t.idx as u32);
         *p += *r * translation;
-        self.mark_dirty(t.idx as u32, TransformComponent::Position);
+        self.mark_dirty(t, TransformComponent::Position);
     }
     fn set_position(&self, t: &TransformGuard, position: Vec3) {
         let p = self._position(t.idx as u32);
         *p = position;
-        self.mark_dirty(t.idx as u32, TransformComponent::Position);
+        self.mark_dirty(t, TransformComponent::Position);
     }
     fn rotate_by(&self, t: &TransformGuard, rotation: Quat) {
         let r = self._rotation(t.idx as u32);
         *r = rotation * *r;
-        self.mark_dirty(t.idx as u32, TransformComponent::Rotation);
+        self.mark_dirty(t, TransformComponent::Rotation);
     }
     fn set_rotation(&self, t: &TransformGuard, rotation: Quat) {
         let r = self._rotation(t.idx as u32);
         *r = rotation;
-        self.mark_dirty(t.idx as u32, TransformComponent::Rotation);
+        self.mark_dirty(t, TransformComponent::Rotation);
     }
-    pub fn get_transform<'a>(&'a self, idx: u32) -> Option<Transform<'a>> {
+    pub fn get_transform(&self, idx: u32) -> Option<Transform> {
         if (idx as usize) < self.mutexes.len() {
             Some(Transform::new(self, idx))
         } else {
@@ -223,10 +253,11 @@ impl TransformHierarchy {
         let mut global_position = self.get_position(t);
         let mut _parent = self.get_parent(t);
         while let Some(parent) = _parent {
-            let parent_position = self.get_position(&self._lock_internal(parent));
-            let parent_rotation = self.get_rotation(&self._lock_internal(parent));
+            let parent = self._lock_internal(parent);
+            let parent_position = self.get_position(&parent);
+            let parent_rotation = self.get_rotation(&parent);
             global_position = parent_position + parent_rotation * global_position;
-            _parent = self.get_parent(&self._lock_internal(parent));
+            _parent = self.get_parent(&parent);
         }
         global_position
     }

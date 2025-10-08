@@ -5,6 +5,7 @@ use crate::{RenderContext, gpu_manager::GPUManager, input::Input};
 use glam::{Quat, Vec3};
 use vulkano::{
     buffer::{BufferUsage, Subbuffer},
+    command_buffer::{AutoCommandBufferBuilder, CopyBufferInfo, PrimaryAutoCommandBuffer},
     format::Format,
     image::{Image, ImageCreateInfo, ImageTiling, ImageType, ImageUsage, view::ImageView},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
@@ -136,6 +137,24 @@ impl Camera {
     }
     pub fn get_proj_matrix(&self, aspect: f32) -> glam::Mat4 {
         glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, aspect, self.near, self.far)
+    }
+    pub fn update_uniform(
+        &self,
+        gpu: &GPUManager,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        aspect: f32,
+    ) {
+        let cam_data_buf = gpu.sub_alloc.allocate_sized().unwrap();
+        {
+            let mut cam_data = cam_data_buf.write().unwrap();
+            *cam_data = crate::vs::camera {
+                view: self.get_view_matrix().to_cols_array_2d(),
+                proj: self.get_proj_matrix(aspect).to_cols_array_2d(),
+            };
+        }
+        builder
+            .copy_buffer(CopyBufferInfo::buffers(cam_data_buf, self.uniform.clone()))
+            .unwrap();
     }
     pub fn translate(&mut self, v: Vec3) {
         self.pos += self.rot * v;

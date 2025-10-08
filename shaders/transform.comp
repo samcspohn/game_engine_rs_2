@@ -25,11 +25,10 @@ layout(set = 1, binding = 4) buffer UpdateFlags {
 
 layout(set = 2, binding = 0) buffer ModelMatrices { mat4 model_matrices[]; };
 
-layout(push_constant) uniform PushConstants {
+layout(set = 3, binding = 0) uniform PushConstants {
   uint stage; // 0 = apply updates, 1 = compute matrices
   uint count;
-}
-pc;
+} pc;
 
 mat4 compute_model_matrix(vec3 position, vec4 rotation, vec3 scale) {
   mat4 translation_matrix = mat4(1.0);
@@ -90,33 +89,45 @@ mat4 get_global_matrix(uint index) {
 
 void main() {
   uint idx = gl_GlobalInvocationID.x;
-  if (idx >= pc.count) {
-    return;
-  }
   switch (pc.stage) {
   case 0: {
+    if (idx >= ceil(float(pc.count) / 8.0)) {
+      return;
+    }
     // 4 bits per update
-    uint flag_index = (idx * 4) / 32;
-    uint bit_index = (idx * 4) % 32;
-    if (((update_flags[flag_index] >> bit_index) & 1) != 0) {
-      positions[idx] =
-          vec3(update_positions[idx * 3], update_positions[idx * 3 + 1],
-               update_positions[idx * 3 + 2]);
+    // uint flag_index = (idx * 4) / 32;
+    // uint bit_index = (idx * 4) % 32;
+    uint flag_index = idx;
+    for (uint i = 0; i < 8; ++i) {
+      uint bit_index = i * 4;
+      if (flag_index * 8 + i >= pc.count) {
+        break;
+      }
+      uint idx = flag_index * 8 + i;
+      if (((update_flags[flag_index] >> bit_index) & 1) != 0) {
+        positions[idx] =
+            vec3(update_positions[idx * 3], update_positions[idx * 3 + 1],
+                update_positions[idx * 3 + 2]);
+      }
+      if (((update_flags[flag_index] >> (bit_index + 1)) & 1) != 0) {
+        rotations[idx] =
+            vec4(update_rotations[idx * 4], update_rotations[idx * 4 + 1],
+                update_rotations[idx * 4 + 2], update_rotations[idx * 4 + 3]);
+      }
+      if (((update_flags[flag_index] >> (bit_index + 2)) & 1) != 0) {
+        scales[idx] = vec3(update_scales[idx * 3], update_scales[idx * 3 + 1],
+                          update_scales[idx * 3 + 2]);
+      }
+      if (((update_flags[flag_index] >> (bit_index + 3)) & 1) != 0) {
+        parent_indices[idx] = update_parent_indices[idx];
+      }
     }
-    if (((update_flags[flag_index] >> (bit_index + 1)) & 1) != 0) {
-      rotations[idx] =
-          vec4(update_rotations[idx * 4], update_rotations[idx * 4 + 1],
-               update_rotations[idx * 4 + 2], update_rotations[idx * 4 + 3]);
-    }
-    if (((update_flags[flag_index] >> (bit_index + 2)) & 1) != 0) {
-      scales[idx] = vec3(update_scales[idx * 3], update_scales[idx * 3 + 1],
-                         update_scales[idx * 3 + 2]);
-    }
-    if (((update_flags[flag_index] >> (bit_index + 3)) & 1) != 0) {
-      parent_indices[idx] = update_parent_indices[idx];
-    }
+
   } break;
   case 1: {
+    if (idx >= pc.count) {
+      return;
+    }
     model_matrices[idx] = get_global_matrix(idx);
   } break;
   default:

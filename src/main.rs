@@ -30,7 +30,10 @@ use std::{
 use transform::{TransformHierarchy, compute::TransformCompute};
 use vulkano::{
     Validated, VulkanError,
-    command_buffer::{AutoCommandBufferBuilder, BlitImageInfo, CommandBufferUsage, CopyBufferInfo},
+    command_buffer::{
+        AutoCommandBufferBuilder, BlitImageInfo, CommandBufferUsage, CopyBufferInfo,
+        PrimaryAutoCommandBuffer,
+    },
     swapchain::{SwapchainPresentInfo, acquire_next_image},
     sync::{self, GpuFuture},
 };
@@ -41,6 +44,8 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::WindowId,
 };
+
+use crate::transform::_Transform;
 
 mod asset_manager;
 mod camera;
@@ -59,7 +64,7 @@ fn main() -> Result<(), impl Error> {
 }
 
 const MAX_FPS_SAMPLE_AGE: f32 = 1.0;
-const NUM_CUBES: usize = 3_000_000;
+const NUM_CUBES: usize = 1_000_000;
 struct FPS {
     frame_times: std::collections::VecDeque<f32>,
     frame_ages: std::collections::VecDeque<time::Instant>,
@@ -107,8 +112,10 @@ struct App {
     camera: HashMap<WindowId, Arc<Mutex<camera::Camera>>>,
     transform_hierarchy: TransformHierarchy,
     transform_compute: TransformCompute,
-    update_transforms: bool,
+    // update_transforms: bool,
     transforms_updated: bool,
+    // builder: Option<AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>>,
+    pub previous_frame_end: Option<Box<dyn GpuFuture>>,
 }
 
 impl App {
@@ -144,72 +151,77 @@ impl App {
         let mut asset_manager = asset_manager::AssetManager::new(gpu.clone());
         asset_manager.set_placeholder_asset(Obj::default(&gpu));
         asset_manager.set_placeholder_asset(texture::Texture::default(&gpu));
+
+        let mut previous_frame_end = Some(sync::now(gpu.device.clone()).boxed());
+
+        let mut transform_compute = TransformCompute::new(&gpu);
         let mut transform_hierarchy = TransformHierarchy::new();
 
         let dims = (NUM_CUBES as f64).powf(1.0 / 3.0).ceil() as u32;
         for i in 0..NUM_CUBES {
-            let _t = transform_hierarchy.create_transform(&format!("cube_{i}"));
-            let t = _t.lock();
             let x = (i as u32 % dims) as f32;
             let y = ((i as u32 / dims) % dims) as f32;
             let z = (i as u32 / (dims * dims)) as f32;
             let spacing = 10.0;
-            t.set_position(Vec3::new(
-                (x - dims as f32 / 2.0) * spacing,
-                (y - dims as f32 / 2.0) * spacing,
-                (z - dims as f32 / 2.0) * spacing,
-            ));
-            // t.set_position(Vec3::new(
-            //     (rand::random::<f32>() - 0.5) * 1000.0,
-            //     (rand::random::<f32>() - 0.5) * 1000.0,
-            //     (rand::random::<f32>() - 0.5) * 1000.0,
-            // ));
-            t.set_rotation(glam::Quat::from_axis_angle(
-                Vec3::new(
-                    rand::random::<f32>(),
-                    rand::random::<f32>(),
-                    rand::random::<f32>(),
-                )
-                .normalize(),
-                rand::random::<f32>() * std::f32::consts::TAU,
-            ));
-            // let pos = transform_hierarchy._position(i as u32);
-            // pos.x = (rand::random::<f32>() - 0.5) * 1000.0;
-            // pos.y = (rand::random::<f32>() - 0.5) * 1000.0;
-            // pos.z = (rand::random::<f32>() - 0.5) * 1000.0;
-            // let scale = transform_hierarchy._scale(i as u32);
-            // let s = rand::random::<f32>() * 2.0 + 0.1;
-            // scale.x = s;
-            // scale.y = s;
-            // scale.z = s;
+            let t = _Transform {
+                position: Vec3::new(
+                    (x - dims as f32 / 2.0) * spacing,
+                    (y - dims as f32 / 2.0) * spacing,
+                    (z - dims as f32 / 2.0) * spacing,
+                ),
+                rotation: glam::Quat::from_axis_angle(
+                    Vec3::new(
+                        rand::random::<f32>(),
+                        rand::random::<f32>(),
+                        rand::random::<f32>(),
+                    )
+                    .normalize(),
+                    rand::random::<f32>() * std::f32::consts::TAU,
+                ),
+                scale: Vec3::splat(rand::random::<f32>() * 2.0 + 0.1),
+                name: format!("cube_{i}"),
+                parent: None,
+            };
+            transform_hierarchy.create_transform(t);
         }
+
+        let mut builder = gpu.create_command_buffer(CommandBufferUsage::OneTimeSubmit);
+
+        transform_compute.update_transforms(&gpu, &transform_hierarchy, &mut builder);
+        let command_buffer = builder.build().unwrap();
+
+        // execute buffer copies and global compute shaders
+        previous_frame_end = Some(
+            previous_frame_end
+                .take()
+                .unwrap()
+                .then_execute(gpu.queue.clone(), command_buffer)
+                .unwrap()
+                .then_signal_semaphore()
+                .then_execute(
+                    gpu.queue.clone(),
+                    transform_compute.command_buffer.as_ref().unwrap().clone(),
+                )
+                .unwrap()
+                .then_signal_semaphore()
+                .boxed(),
+        );
 
         App {
             asset_manager,
-            transform_compute: TransformCompute::new(&gpu),
+            transform_compute,
+            previous_frame_end,
             gpu,
             cube: None,
-            // offsets: (0..NUM_CUBES)
-            //     .map(|_| {
-            //         (Vec3::new(
-            //             rand::random::<f32>() - 0.5,
-            //             rand::random::<f32>() - 0.5,
-            //             rand::random::<f32>() - 0.5,
-            //         ) * 100.0)
-            //             .to_array()
-            //     })
-            //     .collect(),
-            // cube: asset_manager.load_obj("assets/cube/cube.obj"),
-            // cube,
-            // vertex_buffer,
             rcxs: HashMap::new(),
             fps: FPS::new(),
             time: std::time::Instant::now(),
             camera: HashMap::new(),
             cursor_grabbed: false,
             transform_hierarchy,
-            update_transforms: true,
+            // update_transforms: true,
             transforms_updated: false,
+            // builder: None,
         }
     }
 }
@@ -331,7 +343,7 @@ impl ApplicationHandler for App {
                 if window_size.width == 0 || window_size.height == 0 {
                     return;
                 }
-                rcx.previous_frame_end.as_mut().unwrap().cleanup_finished();
+                self.previous_frame_end.as_mut().unwrap().cleanup_finished();
                 if rcx.recreate_swapchain {
                     rcx.recreate_swapchain();
                 }
@@ -352,25 +364,25 @@ impl ApplicationHandler for App {
                 if suboptimal {
                     rcx.recreate_swapchain = true;
                 }
-                // update changed buffers
-                let mut builder = AutoCommandBufferBuilder::primary(
-                    self.gpu.cmd_alloc.clone(),
-                    self.gpu.queue.queue_family_index(),
-                    CommandBufferUsage::OneTimeSubmit,
-                )
-                .unwrap();
+                // // update changed buffers
+                // let mut builder = AutoCommandBufferBuilder::primary(
+                //     self.gpu.cmd_alloc.clone(),
+                //     self.gpu.queue.queue_family_index(),
+                //     CommandBufferUsage::OneTimeSubmit,
+                // )
+                // .unwrap();
 
-                if self.update_transforms {
-                    self.transforms_updated = self.transform_compute.update_transforms(
-                        &self.gpu,
-                        &self.transform_hierarchy,
-                        &mut builder,
-                    );
-                    self.update_transforms = false;
-                }
-                if self.transforms_updated {
-                    rcx.command_buffer = None;
-                }
+                // if self.update_transforms {
+                //     self.transforms_updated = self.transform_compute.update_transforms(
+                //         &self.gpu,
+                //         &self.transform_hierarchy,
+                //         &mut builder,
+                //     );
+                //     self.update_transforms = false;
+                // }
+                // if self.transforms_updated {
+                //     rcx.command_buffer = None;
+                // }
 
                 if rcx.command_buffer.is_none() {
                     let gpu = &self.gpu;
@@ -385,30 +397,18 @@ impl ApplicationHandler for App {
 
                 let gpu = &self.gpu;
                 let cam = camera.lock();
+                // // cam.update_uniform(
+                // //     gpu,
+                // //     &mut builder,
+                // //     rcx.viewport.extent[0] / rcx.viewport.extent[1].abs(),
+                // // );
+                // let command_buffer = builder.build().unwrap();
 
-                let cam_data_buf = gpu.sub_alloc.allocate_sized().unwrap();
-                *cam_data_buf.write().unwrap() = vs::camera {
-                    view: cam.get_view_matrix().to_cols_array_2d(),
-                    proj: cam
-                        .get_proj_matrix(rcx.viewport.extent[0] / rcx.viewport.extent[1].abs())
-                        .to_cols_array_2d(),
-                };
-                builder
-                    .copy_buffer(CopyBufferInfo::buffers(cam_data_buf, cam.uniform.clone()))
-                    .unwrap();
-                let command_buffer = builder.build().unwrap();
-
-                let a = rcx
+                let a = self
                     .previous_frame_end
                     .take()
                     .unwrap()
                     .join(acquire_future)
-                    .then_execute(gpu.queue.clone(), command_buffer)
-                    .unwrap()
-                    .then_signal_semaphore();
-
-                // execute reusable command buffer
-                let a = a
                     .then_execute(
                         gpu.queue.clone(),
                         rcx.command_buffer.as_ref().unwrap().clone(),
@@ -416,12 +416,9 @@ impl ApplicationHandler for App {
                     .unwrap();
 
                 // blit to swapchain image
-                let mut builder = AutoCommandBufferBuilder::primary(
-                    gpu.cmd_alloc.clone(),
-                    gpu.queue.queue_family_index(),
-                    CommandBufferUsage::OneTimeSubmit,
-                )
-                .unwrap();
+                let mut builder = self
+                    .gpu
+                    .create_command_buffer(CommandBufferUsage::OneTimeSubmit);
                 builder
                     .blit_image(BlitImageInfo::images(
                         cam.image.clone(),
@@ -450,15 +447,15 @@ impl ApplicationHandler for App {
 
                 match future.map_err(Validated::unwrap) {
                     Ok(future) => {
-                        rcx.previous_frame_end = Some(future.boxed());
+                        self.previous_frame_end = Some(future.boxed());
                     }
                     Err(VulkanError::OutOfDate) => {
                         rcx.recreate_swapchain = true;
-                        rcx.previous_frame_end = Some(sync::now(gpu.device.clone()).boxed());
+                        self.previous_frame_end = Some(sync::now(gpu.device.clone()).boxed());
                     }
                     Err(e) => {
                         println!("failed to flush future: {e}");
-                        rcx.previous_frame_end = Some(sync::now(gpu.device.clone()).boxed());
+                        self.previous_frame_end = Some(sync::now(gpu.device.clone()).boxed());
                     }
                 }
             }
@@ -476,22 +473,7 @@ impl ApplicationHandler for App {
         if self.cube.is_none() {
             self.cube = Some(self.asset_manager.load_asset::<Obj>("assets/cube/cube.obj"));
         }
-        static LAST_PRINT: LazyLock<Mutex<std::time::Instant>> =
-            LazyLock::new(|| Mutex::new(std::time::Instant::now()));
-        {
-            let mut last_print = LAST_PRINT.lock();
-            if last_print.elapsed().as_secs_f32() > 5.0 {
-                println!(
-                    "allocate buffers: {:?} / update buffers: {:?} / compute: {:?}",
-                    self.transform_compute.perf_counters.allocate_bufs,
-                    self.transform_compute.perf_counters.update_bufs,
-                    self.transform_compute.perf_counters.compute,
-                );
-                *last_print = std::time::Instant::now();
-            }
-        }
 
-        // find direction of tangent on circle at angle sine(time since epoch)
         let time_since_epoch = std::time::SystemTime::now()
             .duration_since(time::UNIX_EPOCH)
             .unwrap()
@@ -503,15 +485,62 @@ impl ApplicationHandler for App {
             let t = t.lock();
             t.translate_by(translation);
         });
+        // test performance of non-reuse of command buffers
+        // self.transform_compute.command_buffer = None;
+        // for (_window_id, rcx) in self.rcxs.iter_mut() {
+        //     rcx.command_buffer = None;
+        // }
 
+        // process asset loading queue
         self.asset_manager.process_deferred_queue();
         self.gpu.process_work_queue();
-        self.update_transforms = true;
+
+        // build command buffer to update buffers
+        let mut builder = self
+            .gpu
+            .create_command_buffer(CommandBufferUsage::OneTimeSubmit);
+
+        let transforms_updated = self.transform_compute.update_transforms(
+            &self.gpu,
+            &self.transform_hierarchy,
+            &mut builder,
+        );
+        for (_window_id, rcx) in self.rcxs.iter_mut() {
+            let cam = self.camera.get_mut(&_window_id).unwrap();
+            cam.lock().update_uniform(
+                &self.gpu,
+                &mut builder,
+                rcx.viewport.extent[0] / rcx.viewport.extent[1].abs(),
+            );
+        }
+        let command_buffer = builder.build().unwrap();
+
+        // execute buffer copies and global compute shaders
+        self.previous_frame_end = Some(
+            self.previous_frame_end
+                .take()
+                .unwrap()
+                .then_execute(self.gpu.queue.clone(), command_buffer)
+                .unwrap()
+                .then_signal_semaphore()
+                .then_execute(
+                    self.gpu.queue.clone(),
+                    self.transform_compute
+                        .command_buffer
+                        .as_ref()
+                        .unwrap()
+                        .clone(),
+                )
+                .unwrap()
+                .then_signal_semaphore()
+                .boxed(),
+        );
 
         if self
             .asset_manager
             .rebuild_command_buffer
             .load(std::sync::atomic::Ordering::SeqCst)
+            || transforms_updated
         {
             for (_window_id, rcx) in self.rcxs.iter_mut() {
                 rcx.command_buffer = None;
@@ -564,6 +593,21 @@ impl ApplicationHandler for App {
             let window_id = rcx.window.id();
             self.camera.insert(window_id, camera);
             self.rcxs.insert(window_id, rcx);
+        }
+
+        static LAST_PRINT: LazyLock<Mutex<std::time::Instant>> =
+            LazyLock::new(|| Mutex::new(std::time::Instant::now()));
+        {
+            let mut last_print = LAST_PRINT.lock();
+            if last_print.elapsed().as_secs_f32() > 5.0 {
+                println!(
+                    "allocate buffers: {:?} / update buffers: {:?} / compute: {:?}",
+                    self.transform_compute.perf_counters.allocate_bufs,
+                    self.transform_compute.perf_counters.update_bufs,
+                    self.transform_compute.perf_counters.compute,
+                );
+                *last_print = std::time::Instant::now();
+            }
         }
     }
 }

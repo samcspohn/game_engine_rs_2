@@ -45,7 +45,7 @@ pub struct RenderContext {
     pub pipeline: Arc<GraphicsPipeline>,
     pub viewport: Viewport,
     pub recreate_swapchain: bool,
-    pub previous_frame_end: Option<Box<dyn GpuFuture>>,
+    // pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     pub gui: Gui,
     pub gui_drawn: bool,
     pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
@@ -188,7 +188,7 @@ impl RenderContext {
             depth_range: 0.0..=1.0,
         };
         let recreate_swapchain = false;
-        let previous_frame_end = Some(sync::now(gpu.device.clone()).boxed());
+        // let previous_frame_end = Some(sync::now(gpu.device.clone()).boxed());
 
         let gui = Gui::new(
             &event_loop,
@@ -209,7 +209,7 @@ impl RenderContext {
             pipeline,
             viewport,
             recreate_swapchain,
-            previous_frame_end,
+            // previous_frame_end,
             gui,
             gui_drawn: false,
             command_buffer: None,

@@ -1,0 +1,110 @@
+const OUTER: usize = 32;
+        const INNER: usize = 8;
+        (0..hierarchy.metadata.len().div_ceil(OUTER * INNER))
+            .into_par_iter()
+            .for_each(|chunks| {
+                // outer * inner
+                let poss = unsafe { &mut *pos.get() };
+                let rots = unsafe { &mut *rot.get() };
+                let scales = unsafe { &mut *scale.get() };
+                let parents = unsafe { &mut *parent.get() };
+                let flags = unsafe { &mut *_flags.get() };
+                let hierarchy = unsafe { &*_hierarchy.get() };
+                let start = chunks * OUTER;
+                let end = (start + OUTER).min(hierarchy.metadata.len().div_ceil(INNER));
+
+                (start..end).for_each(|i| {
+                    // 32 loops
+                    let start = start + i * INNER;
+                    let end = (start + INNER).min(hierarchy.metadata.len());
+                    let mut flag = 0u32;
+                    let mut bit = 0u32;
+                    (start..end).for_each(|idx| {
+                        // 8 loops
+                        if unsafe { *hierarchy.dirty[idx][0].as_ptr() } {
+                            let p = unsafe { &*hierarchy.positions[idx].get() };
+                            poss[idx] = [p.x, p.y, p.z];
+                            unsafe { *hierarchy.dirty[idx][0].as_ptr() = false };
+                            flag |= 1 << (bit);
+                        }
+                        if unsafe { *hierarchy.dirty[idx][1].as_ptr() } {
+                            let r = unsafe { &*hierarchy.rotations[idx].get() };
+                            rots[idx] = [r.x, r.y, r.z, r.w];
+                            unsafe { *hierarchy.dirty[idx][1].as_ptr() = false };
+                            flag |= 1 << (bit + 1);
+                        }
+                        if unsafe { *hierarchy.dirty[idx][2].as_ptr() } {
+                            let s = unsafe { &*hierarchy.scales[idx].get() };
+                            scales[idx] = [s.x, s.y, s.z];
+                            unsafe { *hierarchy.dirty[idx][2].as_ptr() = false };
+                            flag |= 1 << (bit + 2);
+                        }
+                        if unsafe { *hierarchy.dirty[idx][3].as_ptr() } {
+                            let p = hierarchy.metadata[idx].parent;
+                            parents[idx] = p;
+                            unsafe { *hierarchy.dirty[idx][3].as_ptr() = false };
+                            flag |= 1 << (bit + 3);
+                        }
+                        bit += 4;
+                    });
+                    flags[i] = flag;
+                });
+            });
+
+
+allocate buffers: 0.00 ms / update buffers: 2.41 ms / compute: 0.08 ms
+allocate buffers: 0.00 ms / update buffers: 2.38 ms / compute: 0.08 ms
+allocate buffers: 0.00 ms / update buffers: 2.35 ms / compute: 0.08 ms
+allocate buffers: 0.00 ms / update buffers: 2.40 ms / compute: 0.08 ms
+allocate buffers: 0.00 ms / update buffers: 2.36 ms / compute: 0.08 ms
+allocate buffers: 0.00 ms / update buffers: 2.48 ms / compute: 0.08 ms
+
+
+
+
+        (0..hierarchy.metadata.len())
+            .into_par_iter()
+            .chunks(8)
+            .enumerate()
+            .chunks(32)
+            .for_each(|chunk| {
+                let poss = unsafe { &mut *pos.get() };
+                let rots = unsafe { &mut *rot.get() };
+                let scales = unsafe { &mut *scale.get() };
+                let parents = unsafe { &mut *parent.get() };
+                let flags = unsafe { &mut *_flags.get() };
+                let hierarchy = unsafe { &*_hierarchy.get() };
+                chunk.iter().for_each(|(i, chunk)| {
+                    let mut flag = 0u32;
+                    let mut bit = 0u32;
+                    for idx in chunk {
+                        let idx = *idx;
+                        if unsafe { *hierarchy.dirty[idx][0].as_ptr() } {
+                            let p = unsafe { &*hierarchy.positions[idx].get() };
+                            poss[idx] = [p.x, p.y, p.z];
+                            unsafe { *hierarchy.dirty[idx][0].as_ptr() = false };
+                            flag |= 1 << (bit);
+                        }
+                        if unsafe { *hierarchy.dirty[idx][1].as_ptr() } {
+                            let r = unsafe { &*hierarchy.rotations[idx].get() };
+                            rots[idx] = [r.x, r.y, r.z, r.w];
+                            unsafe { *hierarchy.dirty[idx][1].as_ptr() = false };
+                            flag |= 1 << (bit + 1);
+                        }
+                        if unsafe { *hierarchy.dirty[idx][2].as_ptr() } {
+                            let s = unsafe { &*hierarchy.scales[idx].get() };
+                            scales[idx] = [s.x, s.y, s.z];
+                            unsafe { *hierarchy.dirty[idx][2].as_ptr() = false };
+                            flag |= 1 << (bit + 2);
+                        }
+                        if unsafe { *hierarchy.dirty[idx][3].as_ptr() } {
+                            let p = hierarchy.metadata[idx].parent;
+                            parents[idx] = p;
+                            unsafe { *hierarchy.dirty[idx][3].as_ptr() = false };
+                            flag |= 1 << (bit + 3);
+                        }
+                        bit += 4;
+                    }
+                    flags[*i] = flag;
+                });
+            });

@@ -1,0 +1,125 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+layout(local_size_x = 64) in;
+
+// static-ish buffers
+layout(set = 0, binding = 0) buffer Positions { vec3 positions[]; };
+layout(set = 0, binding = 1) buffer Rotations { vec4 rotations[]; };
+layout(set = 0, binding = 2) buffer Scales { vec3 scales[]; };
+layout(set = 0, binding = 3) buffer ParentIndices { uint parent_indices[]; };
+
+// update buffers
+layout(set = 1, binding = 0) buffer UpdatePositions {
+  float update_positions[];
+};
+layout(set = 1, binding = 1) buffer UpdateRotations {
+  float update_rotations[];
+};
+layout(set = 1, binding = 2) buffer UpdateScales { float update_scales[]; };
+layout(set = 1, binding = 3) buffer UpdateParentIndices {
+  uint update_parent_indices[];
+};
+layout(set = 1, binding = 4) buffer UpdateFlags {
+  uint update_flags[]; // bit flags, 0 = no update, 1 = update
+};
+
+layout(set = 2, binding = 0) buffer ModelMatrices { mat4 model_matrices[]; };
+
+layout(push_constant) uniform PushConstants {
+  uint stage; // 0 = apply updates, 1 = compute matrices
+  uint count;
+}
+pc;
+
+mat4 compute_model_matrix(vec3 position, vec4 rotation, vec3 scale) {
+  mat4 translation_matrix = mat4(1.0);
+  translation_matrix[3] = vec4(position, 1.0);
+
+  mat4 rotation_matrix = mat4(1.0);
+  float x = rotation.x;
+  float y = rotation.y;
+  float z = rotation.z;
+  float w = rotation.w;
+  rotation_matrix[0][0] = 1.0 - 2.0 * (y * y + z * z);
+  rotation_matrix[0][1] = 2.0 * (x * y - z * w);
+  rotation_matrix[0][2] = 2.0 * (x * z + y * w);
+  rotation_matrix[1][0] = 2.0 * (x * y + z * w);
+  rotation_matrix[1][1] = 1.0 - 2.0 * (x * x + z * z);
+  rotation_matrix[1][2] = 2.0 * (y * z - x * w);
+  rotation_matrix[2][0] = 2.0 * (x * z - y * w);
+  rotation_matrix[2][1] = 2.0 * (y * z + x * w);
+  rotation_matrix[2][2] = 1.0 - 2.0 * (x * x + y * y);
+
+  mat4 scale_matrix = mat4(1.0);
+  scale_matrix[0][0] = scale.x;
+  scale_matrix[1][1] = scale.y;
+  scale_matrix[2][2] = scale.z;
+
+  return translation_matrix * rotation_matrix * scale_matrix;
+}
+
+// struct Transform {
+//     vec3 position;
+//     vec4 rotation;
+//     vec3 scale;
+//     int parent_index;
+// };
+
+mat4 get_global_matrix(uint index) {
+  if (index == -1) {
+    return mat4(1.0);
+  }
+
+  vec3 position = positions[index];
+  vec4 rotation = rotations[index];
+  vec3 scale = scales[index];
+  uint parent_index = parent_indices[index];
+  mat4 global_matrix = compute_model_matrix(position, rotation, scale);
+  while (parent_index != -1) {
+    position = positions[parent_index];
+    rotation = rotations[parent_index];
+    scale = scales[parent_index];
+    global_matrix =
+        compute_model_matrix(position, rotation, scale) * global_matrix;
+    parent_index = parent_indices[parent_index];
+  }
+  return global_matrix;
+  // return get_global_matrix(t.parent_index) * compute_model_matrix(t.position,
+  // t.rotation, t.scale);
+}
+
+void main() {
+  uint idx = gl_GlobalInvocationID.x;
+  if (idx >= pc.count) {
+    return;
+  }
+  switch (pc.stage) {
+  case 0: {
+    // 4 bits per update
+    uint flag_index = (idx * 4) / 32;
+    uint bit_index = (idx * 4) % 32;
+    if (((update_flags[flag_index] >> bit_index) & 1) != 0) {
+      positions[idx] =
+          vec3(update_positions[idx * 3], update_positions[idx * 3 + 1],
+               update_positions[idx * 3 + 2]);
+    }
+    if (((update_flags[flag_index] >> (bit_index + 1)) & 1) != 0) {
+      rotations[idx] =
+          vec4(update_rotations[idx * 4], update_rotations[idx * 4 + 1],
+               update_rotations[idx * 4 + 2], update_rotations[idx * 4 + 3]);
+    }
+    if (((update_flags[flag_index] >> (bit_index + 2)) & 1) != 0) {
+      scales[idx] = vec3(update_scales[idx * 3], update_scales[idx * 3 + 1],
+                         update_scales[idx * 3 + 2]);
+    }
+    if (((update_flags[flag_index] >> (bit_index + 3)) & 1) != 0) {
+      parent_indices[idx] = update_parent_indices[idx];
+    }
+  } break;
+  case 1: {
+    model_matrices[idx] = get_global_matrix(idx);
+  } break;
+  default:
+    return;
+  }
+}

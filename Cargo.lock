@@ -532,6 +532,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
+name = "downcast-rs"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
+
+[[package]]
 name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -762,6 +768,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "force-send-sync"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4dbc81636580410b2b7e15a396d2adc2c4c5777fa515e4838cd69293064ba875"
+
+[[package]]
 name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -801,12 +813,16 @@ dependencies = [
 name = "game_engine_rs_2"
 version = "0.1.0"
 dependencies = [
+ "downcast-rs 2.0.2",
  "egui",
  "egui_winit_vulkano",
+ "force-send-sync",
  "glam",
  "image",
+ "parking_lot",
  "rand 0.9.2",
  "rayon",
+ "segvec",
  "tobj",
  "vulkano",
  "vulkano-shaders",
@@ -2182,6 +2198,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "segvec"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c3ab3d9bc0d11482ed0019aa9c2cee94a0b4890a0eb21ce2153d88b1816f877"
+dependencies = [
+ "either",
+ "num-integer",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2807,7 +2833,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673a33c33048a5ade91a6b139580fa174e19fb0d23f396dca9fa15f2e1e49b35"
 dependencies = [
  "cc",
- "downcast-rs",
+ "downcast-rs 1.2.1",
  "rustix 1.1.2",
  "scoped-tls",
  "smallvec",

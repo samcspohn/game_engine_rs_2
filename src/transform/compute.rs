@@ -8,7 +8,7 @@ use std::{
 
 use parking_lot::Mutex;
 use rayon::iter::{
-    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator
 };
 use vulkano::{
     buffer::{BufferUsage, Subbuffer},
@@ -398,7 +398,7 @@ impl TransformCompute {
         (0..len.div_ceil(OUTER * INNER))
             .into_par_iter()
             .for_each(|chunks| {
-                let parent_updates = parent_updates.clone();
+                // let parent_updates = parent_updates.clone();
                 let thread_index = rayon::current_thread_index().unwrap();
                 let _parent_updates = &mut parent_updates[thread_index].lock();
                 // outer * inner
@@ -420,7 +420,7 @@ impl TransformCompute {
                     let mut bit = 0b1u32;
                     (inner_start..inner_end).for_each(|idx| {
                         // 32 loops
-                        let dirty = unsafe { *hierarchy.dirty[idx].get() };
+                        let dirty = hierarchy.get_dirty(idx as u32);
                         // if dirty & (1 << 4) != 0 {
                         let _idx = idx * 10; // 3 pos, 4 rot, 3 scale
                         if dirty & (1 << 0) != 0 {
@@ -442,12 +442,9 @@ impl TransformCompute {
                         if dirty & (1 << 3) != 0 {
                             let p = hierarchy.metadata[idx].parent;
                             _parent_updates.push((idx as u32, p));
-                            //     let p = hierarchy.metadata[idx].parent;
-                            //     parents[idx] = p;
-                            //     flag |= 1 << (bit + 3);
                         }
                         // }
-                        unsafe { *hierarchy.dirty[idx].get() = 0 };
+                        hierarchy.mark_clean(idx as u32);
                         bit <<= 1;
                     });
                     flags[i * 3 + 0] = pos_flag;

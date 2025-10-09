@@ -1,7 +1,7 @@
 use std::{
     cell::SyncUnsafeCell,
     ops::Sub,
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
 };
 
 use glam::{Quat, Vec3};
@@ -87,7 +87,7 @@ pub struct TransformHierarchy {
     rotations: SegVec<SyncUnsafeCell<Quat>>,
     scales: SegVec<SyncUnsafeCell<Vec3>>,
     metadata: SegVec<TransformMeta>,
-    dirty: SegVec<SyncUnsafeCell<u32>>,
+    dirty: SegVec<AtomicU8>,
     global_dirty: AtomicBool,
     // pub buffers: SyncUnsafeCell<*mut TransformBuffers>,
 }
@@ -137,46 +137,41 @@ impl TransformHierarchy {
         if let Some(parent) = t.parent {
             self.metadata[parent as usize].children.push(idx as u32);
         }
-        self.dirty.push(SyncUnsafeCell::new(0b1111));
+        if idx >> 1 >= self.dirty.len() {
+            self.dirty.push(AtomicU8::new(0b1111)); // one u8 for every 2 transforms
+        } else {
+            self.dirty[idx >> 1].fetch_or(0b1111 << 4, Ordering::Relaxed);
+        }
+        // self.dirty.push(AtomicU8::new(0b1111));
 
         Transform::new(self, idx as u32)
     }
 
     #[inline]
     fn mark_dirty(&self, t: &TransformGuard, component: TransformComponent) {
-        // match component {
-        //     TransformComponent::Position => {
-        //         self.dirty[idx as usize]
-        //     }
-        //     TransformComponent::Rotation => {
-        //         self.dirty[idx as usize][1].store(true, Ordering::Relaxed)
-        //     }
-        //     TransformComponent::Scale => self.dirty[idx as usize][2].store(true, Ordering::Relaxed),
-        //     TransformComponent::Parent => {
-        //         self.dirty[idx as usize][3].store(true, Ordering::Relaxed)
-        //     }
-        // }
+        let shift = (t.idx & 1) * 4; // Fixed: Added parentheses for correct precedence
         let flag = match component {
             TransformComponent::Position => 1 << 0,
             TransformComponent::Rotation => 1 << 1,
             TransformComponent::Scale => 1 << 2,
             TransformComponent::Parent => 1 << 3,
-        };
-        unsafe { *self.dirty[t.idx as usize].get() |= flag };
-        // if let Some(buffers) = &self.buffers {
-        // let update_flags = unsafe { &mut *self.buffers.update_flags.get() };
-        // let flag_index = t.idx as usize >> 3; // / 8
-        // let bit_index = t.idx as usize & 7; // % 8
-               // update_flags[flag_index].fetch_or(flag << bit_index, Ordering::Relaxed);
-        // }
-        // self.global_dirty.store(true, Ordering::Relaxed);
+        } << shift;
+        self.dirty[t.idx >> 1].fetch_or(flag, Ordering::Relaxed);
     }
-    fn get_dirty(&self, idx: u32) -> u32 {
-        unsafe { *self.dirty[idx as usize].get() }
+
+    fn get_dirty(&self, idx: u32) -> u8 {
+        let shift = (idx & 1) * 4; // Fixed: Added parentheses
+        let mask = 0b1111 << shift;
+        // Fixed: Use load to read without modifying; shift back to return only the 4 bits
+        (self.dirty[(idx >> 1) as usize].load(Ordering::Relaxed) & mask) >> shift
     }
+
     fn mark_clean(&self, idx: u32) {
-        unsafe { *self.dirty[idx as usize].get() = 0 };
+        let shift = (idx & 1) * 4; // Fixed: Added parentheses
+        let mask = !(0b1111 << shift); // Fixed: Use NOT of the mask to clear the bits
+        self.dirty[(idx >> 1) as usize].fetch_and(mask, Ordering::Relaxed);
     }
+
     fn _lock_internal<'a>(&'a self, idx: u32) -> TransformGuard<'a> {
         let lock = self.mutexes[idx as usize].lock();
         TransformGuard {

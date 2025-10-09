@@ -379,7 +379,7 @@ impl TransformCompute {
                 .into_par_iter()
                 .for_each(|chunks| {
                     // let parent_updates = parent_updates.clone();
-                    let thread_index = rayon::current_thread_index().unwrap();
+                    let thread_index = rayon::current_thread_index().unwrap_or(0);
                     let _parent_updates = &mut parent_updates[thread_index].lock();
                     // outer * inner
                     let poss = unsafe { &mut *pos.get() };

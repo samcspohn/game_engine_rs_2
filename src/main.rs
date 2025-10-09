@@ -64,7 +64,7 @@ fn main() -> Result<(), impl Error> {
 }
 
 const MAX_FPS_SAMPLE_AGE: f32 = 1.0;
-const NUM_CUBES: usize = 1_000_000;
+const NUM_CUBES: usize = 1;
 struct FPS {
     frame_times: std::collections::VecDeque<f32>,
     frame_ages: std::collections::VecDeque<time::Instant>,

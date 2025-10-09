@@ -137,7 +137,7 @@ impl TransformHierarchy {
         if let Some(parent) = t.parent {
             self.metadata[parent as usize].children.push(idx as u32);
         }
-        self.dirty.push(SyncUnsafeCell::new(0b11111));
+        self.dirty.push(SyncUnsafeCell::new(0b1111));
 
         Transform::new(self, idx as u32)
     }
@@ -162,7 +162,7 @@ impl TransformHierarchy {
             TransformComponent::Scale => 1 << 2,
             TransformComponent::Parent => 1 << 3,
         };
-        unsafe { *self.dirty[t.idx as usize].get() |= flag | (1 << 4) };
+        unsafe { *self.dirty[t.idx as usize].get() |= flag };
         // if let Some(buffers) = &self.buffers {
         // let update_flags = unsafe { &mut *self.buffers.update_flags.get() };
         // let flag_index = t.idx as usize >> 3; // / 8
@@ -225,7 +225,7 @@ impl TransformHierarchy {
         *r = rotation;
         self.mark_dirty(t, TransformComponent::Rotation);
     }
-    pub fn get_transform(&self, idx: u32) -> Option<Transform> {
+    pub fn get_transform(&self, idx: u32) -> Option<Transform<'_>> {
         if (idx as usize) < self.mutexes.len() {
             Some(Transform::new(self, idx))
         } else {

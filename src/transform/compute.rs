@@ -2,11 +2,14 @@ use std::{
     cell::SyncUnsafeCell,
     collections::VecDeque,
     fmt::Debug,
-    ops::Div,
+    ops::{Div, Mul},
     sync::{Arc, atomic::AtomicU32},
 };
 
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use parking_lot::Mutex;
+use rayon::iter::{
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
+};
 use vulkano::{
     buffer::{BufferUsage, Subbuffer},
     command_buffer::{
@@ -125,6 +128,10 @@ struct TransformStagingBuffers {
     rotation: Subbuffer<[[f32; 4]]>,
     scale: Subbuffer<[[f32; 3]]>,
     parent: Subbuffer<[u32]>,
+    // position_flags: Subbuffer<[u32]>,
+    // rotation_flags: Subbuffer<[u32]>,
+    // scale_flags: Subbuffer<[u32]>,
+    // values: Subbuffer<[f32]>,
     flags: Subbuffer<[u32]>,
 }
 
@@ -146,16 +153,15 @@ impl TransformStagingBuffers {
             BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
         );
         let parent: Subbuffer<[u32]> = gpu.buffer_array(
-            1,
+            2,
             MemoryTypeFilter::PREFER_DEVICE,
             BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
         );
         let flags: Subbuffer<[u32]> = gpu.buffer_array(
-            1,
+            3,
             MemoryTypeFilter::PREFER_DEVICE,
             BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
         );
-
         Self {
             position,
             rotation,
@@ -167,6 +173,14 @@ impl TransformStagingBuffers {
 
     fn resize(&mut self, gpu: &GPUManager, new_size: u64) {
         if self.position.len() < new_size {
+            // let new_size = new_size.next_power_of_two() * 10;
+            let new_size = new_size.next_power_of_two();
+            self.flags = gpu.buffer_array(
+                new_size.div_ceil(32).mul(3), // 1 bit per pos, rot, scale
+                MemoryTypeFilter::PREFER_DEVICE,
+                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+            );
+
             let new_size = new_size.next_power_of_two();
             self.position = gpu.buffer_array(
                 new_size,
@@ -184,12 +198,7 @@ impl TransformStagingBuffers {
                 BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
             );
             self.parent = gpu.buffer_array(
-                new_size,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-            );
-            self.flags = gpu.buffer_array(
-                new_size.div_ceil(8),
+                new_size * 2,
                 MemoryTypeFilter::PREFER_DEVICE,
                 BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
             );
@@ -251,6 +260,7 @@ pub struct PerfCounters {
     pub allocate_bufs: PerfCounter,
     pub update_bufs: PerfCounter,
     pub compute: PerfCounter,
+    pub update_parents: PerfCounter,
 }
 
 pub struct TransformCompute {
@@ -260,7 +270,7 @@ pub struct TransformCompute {
     staging_buffers: TransformStagingBuffers,
     pub perf_counters: PerfCounters,
     pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
-    pub pc: [Subbuffer<cs::PushConstants>; 2],
+    pub pc: [Subbuffer<cs::PushConstants>; 3],
 }
 
 impl TransformCompute {
@@ -298,6 +308,7 @@ impl TransformCompute {
                 allocate_bufs: PerfCounter::new(),
                 update_bufs: PerfCounter::new(),
                 compute: PerfCounter::new(),
+                update_parents: PerfCounter::new(),
             },
             command_buffer: None,
             pc: [
@@ -307,6 +318,10 @@ impl TransformCompute {
                 ),
                 gpu.buffer_from_data(
                     &cs::PushConstants { stage: 1, count: 0 },
+                    BufferUsage::UNIFORM_BUFFER,
+                ),
+                gpu.buffer_from_data(
+                    &cs::PushConstants { stage: 2, count: 0 },
                     BufferUsage::UNIFORM_BUFFER,
                 ),
             ],
@@ -319,13 +334,6 @@ impl TransformCompute {
         hierarchy: &TransformHierarchy,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
     ) -> bool {
-        // if hierarchy
-        //     .global_dirty
-        //     .swap(false, std::sync::atomic::Ordering::Relaxed)
-        //     == false
-        // {
-        //     return false;
-        // }
         self.perf_counters.allocate_bufs.start();
         let pos_buffer: Subbuffer<[[f32; 3]]> = gpu
             .storage_alloc
@@ -339,27 +347,14 @@ impl TransformCompute {
             .storage_alloc
             .allocate_slice(hierarchy.scales.len() as u64)
             .unwrap();
-        let parent_buffer: Subbuffer<[u32]> = gpu
-            .storage_alloc
-            .allocate_slice(hierarchy.metadata.len() as u64)
-            .unwrap();
         let flags: Subbuffer<[u32]> = gpu
-            .storage_alloc // * 4 flags per transform / 8 transforms per u32
-            .allocate_slice(hierarchy.metadata.len().div_ceil(8) as u64)
+            .storage_alloc
+            .allocate_slice(hierarchy.metadata.len().div_ceil(32) as u64 * 3) // 1 bit per pos, rot, scale
             .unwrap();
 
         let pc1: Subbuffer<cs::PushConstants> = gpu.sub_alloc.allocate_sized().unwrap();
         let pc2: Subbuffer<cs::PushConstants> = gpu.sub_alloc.allocate_sized().unwrap();
-        {
-            *pc1.write().unwrap() = cs::PushConstants {
-                stage: 0,
-                count: hierarchy.metadata.len() as u32,
-            };
-            *pc2.write().unwrap() = cs::PushConstants {
-                stage: 1,
-                count: hierarchy.metadata.len() as u32,
-            };
-        }
+        let pc3: Subbuffer<cs::PushConstants> = gpu.sub_alloc.allocate_sized().unwrap();
 
         self.perf_counters.allocate_bufs.stop();
         // 4 flags per tranform, 1 bit each for pos, rot, scale, parent
@@ -384,28 +379,33 @@ impl TransformCompute {
         let pos_cell = SyncUnsafeCell::new(pos_buffer.write().unwrap());
         let rot_cell = SyncUnsafeCell::new(rot_buffer.write().unwrap());
         let scale_cell = SyncUnsafeCell::new(scale_buffer.write().unwrap());
-        let parent_cell = SyncUnsafeCell::new(parent_buffer.write().unwrap());
-        let flag_cell = SyncUnsafeCell::new(flags.write().unwrap());
+        let flags_cell = SyncUnsafeCell::new(flags.write().unwrap());
         let _hierarchy = SyncUnsafeCell::new(hierarchy);
 
         let pos = &pos_cell;
         let rot = &rot_cell;
         let scale = &scale_cell;
-        let parent = &parent_cell;
-        let _flags = &flag_cell;
+        let _flags = &flags_cell;
 
         const OUTER: usize = 32;
-        const INNER: usize = 8;
+        const INNER: usize = 32;
         let len = hierarchy.len();
+        let parent_updates: Arc<Vec<Mutex<Vec<(u32, u32)>>>> = Arc::new(
+            (0..rayon::current_num_threads())
+                .map(|_| Mutex::new(Vec::new()))
+                .collect(),
+        );
         (0..len.div_ceil(OUTER * INNER))
             .into_par_iter()
             .for_each(|chunks| {
+                let parent_updates = parent_updates.clone();
+                let thread_index = rayon::current_thread_index().unwrap();
+                let _parent_updates = &mut parent_updates[thread_index].lock();
                 // outer * inner
                 let poss = unsafe { &mut *pos.get() };
                 let rots = unsafe { &mut *rot.get() };
                 let scales = unsafe { &mut *scale.get() };
-                let parents = unsafe { &mut *parent.get() };
-                let flags = unsafe { &mut *_flags.get() };
+                let flags = unsafe { &mut *(_flags.get()) };
                 let hierarchy = unsafe { &*_hierarchy.get() };
                 let start = chunks * OUTER;
                 let end = (start + OUTER).min(len.div_ceil(INNER));
@@ -414,50 +414,84 @@ impl TransformCompute {
                     // 32 loops
                     let inner_start = start + i * INNER;
                     let inner_end = (inner_start + INNER).min(len);
-                    let mut flag = 0u32;
-                    let mut bit = 0u32;
+                    let mut pos_flag = 0u32;
+                    let mut rot_flag = 0u32;
+                    let mut scl_flag = 0u32;
+                    let mut bit = 0b1u32;
                     (inner_start..inner_end).for_each(|idx| {
-                        // 8 loops
+                        // 32 loops
                         let dirty = unsafe { *hierarchy.dirty[idx].get() };
-                        if dirty & (1 << 4) != 0 {
-                            if dirty & (1 << 0) != 0 {
-                                let p = unsafe { &*hierarchy.positions[idx].get() };
-                                poss[idx] = [p.x, p.y, p.z];
-                                flag |= 1 << (bit);
-                            }
-                            if dirty & (1 << 1) != 0 {
-                                let r = unsafe { &*hierarchy.rotations[idx].get() };
-                                rots[idx] = [r.x, r.y, r.z, r.w];
-                                flag |= 1 << (bit + 1);
-                            }
-                            if dirty & (1 << 2) != 0 {
-                                let s = unsafe { &*hierarchy.scales[idx].get() };
-                                scales[idx] = [s.x, s.y, s.z];
-                                flag |= 1 << (bit + 2);
-                            }
-                            if dirty & (1 << 3) != 0 {
-                                let p = hierarchy.metadata[idx].parent;
-                                parents[idx] = p;
-                                flag |= 1 << (bit + 3);
-                            }
+                        // if dirty & (1 << 4) != 0 {
+                        let _idx = idx * 10; // 3 pos, 4 rot, 3 scale
+                        if dirty & (1 << 0) != 0 {
+                            let p = unsafe { &*hierarchy.positions[idx].get() };
+                            // values[_idx.._idx + 3].copy_from_slice(&p.to_array());
+                            poss[idx].copy_from_slice(&p.to_array());
+                            pos_flag |= bit;
                         }
+                        if dirty & (1 << 1) != 0 {
+                            let r = unsafe { &*hierarchy.rotations[idx].get() };
+                            rots[idx].copy_from_slice(&r.to_array());
+                            rot_flag |= bit;
+                        }
+                        if dirty & (1 << 2) != 0 {
+                            let s = unsafe { &*hierarchy.scales[idx].get() };
+                            scales[idx].copy_from_slice(&s.to_array());
+                            scl_flag |= bit;
+                        }
+                        if dirty & (1 << 3) != 0 {
+                            let p = hierarchy.metadata[idx].parent;
+                            _parent_updates.push((idx as u32, p));
+                            //     let p = hierarchy.metadata[idx].parent;
+                            //     parents[idx] = p;
+                            //     flag |= 1 << (bit + 3);
+                        }
+                        // }
                         unsafe { *hierarchy.dirty[idx].get() = 0 };
-                        bit += 4;
+                        bit <<= 1;
                     });
-                    flags[i] = flag;
+                    flags[i * 3 + 0] = pos_flag;
+                    flags[i * 3 + 1] = rot_flag;
+                    flags[i * 3 + 2] = scl_flag;
                 });
             });
-        // let len = hierarchy.len();
-        // (0..len.div_ceil(128)).into_par_iter().for_each(|chunk| {
-        //     let start = chunk * 128;
-        //     let end = (start + 128).min(len);
-        //     (start..end).for_each(|i| {
-        //         unsafe {*hierarchy.dirty[i].get() = 0 };
-        //     });
-        // });
-
         self.perf_counters.update_bufs.stop();
+        self.perf_counters.update_parents.start();
+        let parent_updates = Arc::try_unwrap(parent_updates).unwrap();
+
+        let parent_updates = parent_updates
+            .into_iter()
+            .flat_map(|m| m.into_inner())
+            .collect::<Vec<_>>();
+        let parent_updates_len = parent_updates.len();
+        let parent_indices = gpu.storage_alloc.allocate_slice((parent_updates_len * 2).max(1) as u64).unwrap();
+        {
+            let mut write = parent_indices.write().unwrap();
+            for (i, (id, parent_id)) in parent_updates.iter().enumerate() {
+                write[i * 2] = *id;
+                write[i * 2 + 1] = *parent_id;
+            }
+        }
+            
+        
+
+        self.perf_counters.update_parents.stop();
         self.perf_counters.compute.start();
+
+        {
+            *pc1.write().unwrap() = cs::PushConstants {
+                stage: 0,
+                count: hierarchy.metadata.len() as u32,
+            };
+            *pc2.write().unwrap() = cs::PushConstants {
+                stage: 1,
+                count: parent_updates_len as u32,
+            };
+            *pc3.write().unwrap() = cs::PushConstants {
+                stage: 2,
+                count: hierarchy.metadata.len() as u32,
+            };
+        }
 
         if self.command_buffer.is_none() || ret {
             let mut builder = gpu.create_command_buffer(CommandBufferUsage::SimultaneousUse);
@@ -483,8 +517,8 @@ impl TransformCompute {
                     WriteDescriptorSet::buffer(0, self.staging_buffers.position.clone()),
                     WriteDescriptorSet::buffer(1, self.staging_buffers.rotation.clone()),
                     WriteDescriptorSet::buffer(2, self.staging_buffers.scale.clone()),
-                    WriteDescriptorSet::buffer(3, self.staging_buffers.parent.clone()),
-                    WriteDescriptorSet::buffer(4, self.staging_buffers.flags.clone()),
+                    WriteDescriptorSet::buffer(3, self.staging_buffers.flags.clone()),
+                    WriteDescriptorSet::buffer(4, self.staging_buffers.parent.clone()),
                 ],
                 [],
             )
@@ -517,6 +551,13 @@ impl TransformCompute {
                 [],
             )
             .unwrap();
+            let set3_2 = DescriptorSet::new(
+                gpu.desc_alloc.clone(),
+                layout3.clone(),
+                [WriteDescriptorSet::buffer(0, self.pc[2].clone())],
+                [],
+            )
+            .unwrap();
 
             unsafe {
                 builder
@@ -530,7 +571,7 @@ impl TransformCompute {
                     )
                     .unwrap()
                     .dispatch([
-                        self.model_matrix_buffer.len().div_ceil(8).div_ceil(64) as u32,
+                        self.model_matrix_buffer.len().div_ceil(32).div_ceil(64) as u32,
                         1,
                         1,
                     ])
@@ -539,7 +580,20 @@ impl TransformCompute {
                         vulkano::pipeline::PipelineBindPoint::Compute,
                         self.pipeline.layout().clone(),
                         0,
-                        (set, set1, set2, set3_1),
+                        (set.clone(), set1.clone(), set2.clone(), set3_1),
+                    )
+                    .unwrap()
+                    .dispatch([
+                        self.model_matrix_buffer.len().div_ceil(64) as u32,
+                        1,
+                        1,
+                    ])
+                    .unwrap()
+                    .bind_descriptor_sets(
+                        vulkano::pipeline::PipelineBindPoint::Compute,
+                        self.pipeline.layout().clone(),
+                        0,
+                        (set, set1, set2, set3_2),
                     )
                     .unwrap()
                     .dispatch([hierarchy.metadata.len().div_ceil(64) as u32, 1, 1])
@@ -548,6 +602,11 @@ impl TransformCompute {
             self.command_buffer = Some(builder.build().unwrap());
         }
         builder
+            .copy_buffer(CopyBufferInfo::buffers(
+                flags.clone(),
+                self.staging_buffers.flags.clone(),
+            ))
+            .unwrap()
             .copy_buffer(CopyBufferInfo::buffers(
                 pos_buffer.clone(),
                 self.staging_buffers.position.clone(),
@@ -564,23 +623,17 @@ impl TransformCompute {
             ))
             .unwrap()
             .copy_buffer(CopyBufferInfo::buffers(
-                parent_buffer.clone(),
+                parent_indices.clone(),
                 self.staging_buffers.parent.clone(),
-            ))
-            .unwrap()
-            .copy_buffer(CopyBufferInfo::buffers(
-                flags.clone(),
-                self.staging_buffers.flags.clone(),
             ))
             .unwrap()
             .copy_buffer(CopyBufferInfo::buffers(pc1.clone(), self.pc[0].clone()))
             .unwrap()
             .copy_buffer(CopyBufferInfo::buffers(pc2.clone(), self.pc[1].clone()))
+            .unwrap()
+            .copy_buffer(CopyBufferInfo::buffers(pc3.clone(), self.pc[2].clone()))
             .unwrap();
         self.perf_counters.compute.stop();
-
-        // .dispatch([hierarchy.metadata.len().div_ceil(64) as u32, 1, 1])
-        // .unwrap();
         ret
     }
 }

@@ -601,9 +601,10 @@ impl ApplicationHandler for App {
             let mut last_print = LAST_PRINT.lock();
             if last_print.elapsed().as_secs_f32() > 5.0 {
                 println!(
-                    "allocate buffers: {:?} / update buffers: {:?} / compute: {:?}",
+                    "allocate buffers: {:?} / update buffers: {:?} / update parents: {:?} / compute: {:?}",
                     self.transform_compute.perf_counters.allocate_bufs,
                     self.transform_compute.perf_counters.update_bufs,
+                    self.transform_compute.perf_counters.update_parents,
                     self.transform_compute.perf_counters.compute,
                 );
                 *last_print = std::time::Instant::now();

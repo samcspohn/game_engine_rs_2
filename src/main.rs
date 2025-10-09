@@ -45,7 +45,7 @@ use winit::{
     window::WindowId,
 };
 
-use crate::transform::_Transform;
+use crate::transform::{_Transform, compute::PerfCounter};
 
 mod asset_manager;
 mod camera;
@@ -116,6 +116,7 @@ struct App {
     transforms_updated: bool,
     // builder: Option<AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>>,
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
+    frame_time: PerfCounter,
 }
 
 impl App {
@@ -222,6 +223,7 @@ impl App {
             // update_transforms: true,
             transforms_updated: false,
             // builder: None,
+            frame_time: PerfCounter::new(),
         }
     }
 }
@@ -335,6 +337,7 @@ impl ApplicationHandler for App {
                 } else {
                     return;
                 }
+                rcx.frame_time.start();
                 let camera = self.camera.get_mut(&_window_id).unwrap();
 
                 // let cube = self.cube.as_ref().unwrap().get(&self.asset_manager);
@@ -343,10 +346,17 @@ impl ApplicationHandler for App {
                 if window_size.width == 0 || window_size.height == 0 {
                     return;
                 }
+
+                rcx.cleanup.start();
                 self.previous_frame_end.as_mut().unwrap().cleanup_finished();
+                rcx.cleanup.stop();
+
+                rcx.swap_chain_perf.start();
                 if rcx.recreate_swapchain {
+                    print!("Recreating swapchain... ");
                     rcx.recreate_swapchain();
                 }
+                rcx.acquire_next_image_perf.start();
                 let (image_index, suboptimal, acquire_future) = match acquire_next_image(
                     rcx.swapchain.clone(),
                     None,
@@ -360,29 +370,12 @@ impl ApplicationHandler for App {
                     }
                     Err(e) => panic!("failed to acquire next image: {e}"),
                 };
+                rcx.acquire_next_image_perf.stop();
+                rcx.swap_chain_perf.stop();
 
                 if suboptimal {
                     rcx.recreate_swapchain = true;
                 }
-                // // update changed buffers
-                // let mut builder = AutoCommandBufferBuilder::primary(
-                //     self.gpu.cmd_alloc.clone(),
-                //     self.gpu.queue.queue_family_index(),
-                //     CommandBufferUsage::OneTimeSubmit,
-                // )
-                // .unwrap();
-
-                // if self.update_transforms {
-                //     self.transforms_updated = self.transform_compute.update_transforms(
-                //         &self.gpu,
-                //         &self.transform_hierarchy,
-                //         &mut builder,
-                //     );
-                //     self.update_transforms = false;
-                // }
-                // if self.transforms_updated {
-                //     rcx.command_buffer = None;
-                // }
 
                 if rcx.command_buffer.is_none() {
                     let gpu = &self.gpu;
@@ -394,16 +387,9 @@ impl ApplicationHandler for App {
                         self.transform_compute.model_matrix_buffer.clone(),
                     );
                 }
-
+                rcx.build_command_buffer_perf.start();
                 let gpu = &self.gpu;
                 let cam = camera.lock();
-                // // cam.update_uniform(
-                // //     gpu,
-                // //     &mut builder,
-                // //     rcx.viewport.extent[0] / rcx.viewport.extent[1].abs(),
-                // // );
-                // let command_buffer = builder.build().unwrap();
-
                 let a = self
                     .previous_frame_end
                     .take()
@@ -434,7 +420,9 @@ impl ApplicationHandler for App {
                 let a = rcx
                     .gui
                     .draw_on_image(a, rcx.attachment_image_views[image_index as usize].clone());
+                rcx.build_command_buffer_perf.stop();
 
+                rcx.execute_command_buffer_perf.start();
                 let future = a
                     .then_swapchain_present(
                         gpu.queue.clone(),
@@ -458,12 +446,15 @@ impl ApplicationHandler for App {
                         self.previous_frame_end = Some(sync::now(gpu.device.clone()).boxed());
                     }
                 }
+                rcx.execute_command_buffer_perf.stop();
+                rcx.frame_time.stop();
             }
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.frame_time.start();
         let t = time::Instant::now();
         let elapsed = t.duration_since(self.time).as_secs_f32();
         let fps = self.fps.update(elapsed);
@@ -600,6 +591,7 @@ impl ApplicationHandler for App {
         {
             let mut last_print = LAST_PRINT.lock();
             if last_print.elapsed().as_secs_f32() > 5.0 {
+                println!("frame time: {:?}", self.frame_time);
                 println!(
                     "allocate buffers: {:?} / update buffers: {:?} / update parents: {:?} / compute: {:?}",
                     self.transform_compute.perf_counters.allocate_bufs,
@@ -607,8 +599,22 @@ impl ApplicationHandler for App {
                     self.transform_compute.perf_counters.update_parents,
                     self.transform_compute.perf_counters.compute,
                 );
+                for (_window_id, rcx) in self.rcxs.iter() {
+                    println!(
+                        "window {:?} frame time: {:?} / cleanup: {:?} / swap chain: {:?} / acquire next image: {:?} / update camera: {:?} / build command buffer: {:?} / execute command buffer: {:?}",
+                        rcx.window.id(),
+                        rcx.frame_time,
+                        rcx.cleanup,
+                        rcx.swap_chain_perf,
+                        rcx.acquire_next_image_perf,
+                        rcx.update_camera_perf,
+                        rcx.build_command_buffer_perf,
+                        rcx.execute_command_buffer_perf
+                    );
+                }
                 *last_print = std::time::Instant::now();
             }
         }
+        self.frame_time.stop();
     }
 }

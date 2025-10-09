@@ -1,0 +1,2 @@
+copying buffers to staging is more efficient when objects are moving
+more efficient to rebuild command buffers when objects are static

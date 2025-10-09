@@ -8,7 +8,8 @@ use std::{
 
 use parking_lot::Mutex;
 use rayon::iter::{
-    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
+    IntoParallelRefMutIterator, ParallelIterator,
 };
 use vulkano::{
     buffer::{BufferUsage, Subbuffer},
@@ -376,103 +377,108 @@ impl TransformCompute {
             ret = true;
         }
         self.perf_counters.update_bufs.start();
-        let pos_cell = SyncUnsafeCell::new(pos_buffer.write().unwrap());
-        let rot_cell = SyncUnsafeCell::new(rot_buffer.write().unwrap());
-        let scale_cell = SyncUnsafeCell::new(scale_buffer.write().unwrap());
-        let flags_cell = SyncUnsafeCell::new(flags.write().unwrap());
-        let _hierarchy = SyncUnsafeCell::new(hierarchy);
+        let (parent_updates_len, parent_updates) ={
+            let pos_cell = SyncUnsafeCell::new(pos_buffer.write().unwrap());
+            let rot_cell = SyncUnsafeCell::new(rot_buffer.write().unwrap());
+            let scale_cell = SyncUnsafeCell::new(scale_buffer.write().unwrap());
+            let flags_cell = SyncUnsafeCell::new(flags.write().unwrap());
+            let _hierarchy = SyncUnsafeCell::new(hierarchy);
 
-        let pos = &pos_cell;
-        let rot = &rot_cell;
-        let scale = &scale_cell;
-        let _flags = &flags_cell;
+            let pos = &pos_cell;
+            let rot = &rot_cell;
+            let scale = &scale_cell;
+            let _flags = &flags_cell;
 
-        const OUTER: usize = 32;
-        const INNER: usize = 32;
-        let len = hierarchy.len();
-        let parent_updates: Arc<Vec<Mutex<Vec<(u32, u32)>>>> = Arc::new(
-            (0..rayon::current_num_threads())
-                .map(|_| Mutex::new(Vec::new()))
-                .collect(),
-        );
-        (0..len.div_ceil(OUTER * INNER))
-            .into_par_iter()
-            .for_each(|chunks| {
-                // let parent_updates = parent_updates.clone();
-                let thread_index = rayon::current_thread_index().unwrap();
-                let _parent_updates = &mut parent_updates[thread_index].lock();
-                // outer * inner
-                let poss = unsafe { &mut *pos.get() };
-                let rots = unsafe { &mut *rot.get() };
-                let scales = unsafe { &mut *scale.get() };
-                let flags = unsafe { &mut *(_flags.get()) };
-                let hierarchy = unsafe { &*_hierarchy.get() };
-                let start = chunks * OUTER;
-                let end = (start + OUTER).min(len.div_ceil(INNER));
+            const OUTER: usize = 32;
+            const INNER: usize = 32;
+            let len = hierarchy.len();
+            let parent_updates: Arc<Vec<Mutex<Vec<(u32, u32)>>>> = Arc::new(
+                (0..rayon::current_num_threads())
+                    .map(|_| Mutex::new(Vec::new()))
+                    .collect(),
+            );
+            (0..len.div_ceil(OUTER * INNER))
+                .into_par_iter()
+                .for_each(|chunks| {
+                    // let parent_updates = parent_updates.clone();
+                    let thread_index = rayon::current_thread_index().unwrap();
+                    let _parent_updates = &mut parent_updates[thread_index].lock();
+                    // outer * inner
+                    let poss = unsafe { &mut *pos.get() };
+                    let rots = unsafe { &mut *rot.get() };
+                    let scales = unsafe { &mut *scale.get() };
+                    let flags = unsafe { &mut *(_flags.get()) };
+                    let hierarchy = unsafe { &*_hierarchy.get() };
+                    let start = chunks * OUTER;
+                    let end = (start + OUTER).min(len.div_ceil(INNER));
 
-                (start..end).for_each(|i| {
-                    // 32 loops
-                    let inner_start = start + i * INNER;
-                    let inner_end = (inner_start + INNER).min(len);
-                    let mut pos_flag = 0u32;
-                    let mut rot_flag = 0u32;
-                    let mut scl_flag = 0u32;
-                    let mut bit = 0b1u32;
-                    (inner_start..inner_end).for_each(|idx| {
+                    (start..end).for_each(|i| {
                         // 32 loops
-                        let dirty = hierarchy.get_dirty(idx as u32);
-                        // if dirty & (1 << 4) != 0 {
-                        let _idx = idx * 10; // 3 pos, 4 rot, 3 scale
-                        if dirty & (1 << 0) != 0 {
-                            let p = unsafe { &*hierarchy.positions[idx].get() };
-                            // values[_idx.._idx + 3].copy_from_slice(&p.to_array());
-                            poss[idx].copy_from_slice(&p.to_array());
-                            pos_flag |= bit;
-                        }
-                        if dirty & (1 << 1) != 0 {
-                            let r = unsafe { &*hierarchy.rotations[idx].get() };
-                            rots[idx].copy_from_slice(&r.to_array());
-                            rot_flag |= bit;
-                        }
-                        if dirty & (1 << 2) != 0 {
-                            let s = unsafe { &*hierarchy.scales[idx].get() };
-                            scales[idx].copy_from_slice(&s.to_array());
-                            scl_flag |= bit;
-                        }
-                        if dirty & (1 << 3) != 0 {
-                            let p = hierarchy.metadata[idx].parent;
-                            _parent_updates.push((idx as u32, p));
-                        }
-                        // }
-                        hierarchy.mark_clean(idx as u32);
-                        bit <<= 1;
+                        let inner_start = start + i * INNER;
+                        let inner_end = (inner_start + INNER).min(len);
+                        let mut pos_flag = 0u32;
+                        let mut rot_flag = 0u32;
+                        let mut scl_flag = 0u32;
+                        let mut bit = 0b1u32;
+                        (inner_start..inner_end).for_each(|idx| {
+                            // 32 loops
+                            let dirty = hierarchy.get_dirty(idx as u32);
+                            // if dirty & (1 << 4) != 0 {
+                            let _idx = idx * 10; // 3 pos, 4 rot, 3 scale
+                            if dirty & (1 << 0) != 0 {
+                                let p = unsafe { &*hierarchy.positions[idx].get() };
+                                // values[_idx.._idx + 3].copy_from_slice(&p.to_array());
+                                poss[idx].copy_from_slice(&p.to_array());
+                                pos_flag |= bit;
+                            }
+                            if dirty & (1 << 1) != 0 {
+                                let r = unsafe { &*hierarchy.rotations[idx].get() };
+                                rots[idx].copy_from_slice(&r.to_array());
+                                rot_flag |= bit;
+                            }
+                            if dirty & (1 << 2) != 0 {
+                                let s = unsafe { &*hierarchy.scales[idx].get() };
+                                scales[idx].copy_from_slice(&s.to_array());
+                                scl_flag |= bit;
+                            }
+                            if dirty & (1 << 3) != 0 {
+                                let p = hierarchy.metadata[idx].parent;
+                                _parent_updates.push((idx as u32, p));
+                            }
+                            // }
+                            hierarchy.mark_clean(idx as u32);
+                            bit <<= 1;
+                        });
+                        flags[i * 3 + 0] = pos_flag;
+                        flags[i * 3 + 1] = rot_flag;
+                        flags[i * 3 + 2] = scl_flag;
                     });
-                    flags[i * 3 + 0] = pos_flag;
-                    flags[i * 3 + 1] = rot_flag;
-                    flags[i * 3 + 2] = scl_flag;
                 });
-            });
-        self.perf_counters.update_bufs.stop();
-        self.perf_counters.update_parents.start();
-        let parent_updates = Arc::try_unwrap(parent_updates).unwrap();
 
-        let parent_updates = parent_updates
-            .into_iter()
-            .flat_map(|m| m.into_inner())
-            .collect::<Vec<_>>();
-        let parent_updates_len = parent_updates.len();
-        let parent_indices = gpu.storage_alloc.allocate_slice((parent_updates_len * 2).max(1) as u64).unwrap();
-        {
-            let mut write = parent_indices.write().unwrap();
-            for (i, (id, parent_id)) in parent_updates.iter().enumerate() {
-                write[i * 2] = *id;
-                write[i * 2 + 1] = *parent_id;
+            self.perf_counters.update_bufs.stop();
+            self.perf_counters.update_parents.start();
+            let parent_updates = Arc::try_unwrap(parent_updates).unwrap();
+
+            let parent_updates = parent_updates
+                .into_iter()
+                .flat_map(|m| m.into_inner())
+                .collect::<Vec<_>>();
+            let parent_updates_len = parent_updates.len();
+            let parent_indices = gpu
+                .storage_alloc
+                .allocate_slice((parent_updates_len * 2).max(1) as u64)
+                .unwrap();
+            {
+                let mut write = parent_indices.write().unwrap();
+                for (i, (id, parent_id)) in parent_updates.iter().enumerate() {
+                    write[i * 2] = *id;
+                    write[i * 2 + 1] = *parent_id;
+                }
             }
-        }
-            
-        
+            self.perf_counters.update_parents.stop();
+            (parent_updates_len, parent_indices)
+        };
 
-        self.perf_counters.update_parents.stop();
         self.perf_counters.compute.start();
 
         {
@@ -580,11 +586,7 @@ impl TransformCompute {
                         (set.clone(), set1.clone(), set2.clone(), set3_1),
                     )
                     .unwrap()
-                    .dispatch([
-                        self.model_matrix_buffer.len().div_ceil(64) as u32,
-                        1,
-                        1,
-                    ])
+                    .dispatch([self.model_matrix_buffer.len().div_ceil(64) as u32, 1, 1])
                     .unwrap()
                     .bind_descriptor_sets(
                         vulkano::pipeline::PipelineBindPoint::Compute,
@@ -620,7 +622,7 @@ impl TransformCompute {
             ))
             .unwrap()
             .copy_buffer(CopyBufferInfo::buffers(
-                parent_indices.clone(),
+                parent_updates.clone(),
                 self.staging_buffers.parent.clone(),
             ))
             .unwrap()

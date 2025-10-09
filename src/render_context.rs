@@ -54,6 +54,13 @@ pub struct RenderContext {
     pub camera: Arc<Mutex<Camera>>,
     pub input: crate::input::Input,
     pub focused: bool,
+    pub frame_time: crate::PerfCounter,
+    pub swap_chain_perf: crate::PerfCounter,
+    pub update_camera_perf: crate::PerfCounter,
+    pub build_command_buffer_perf: crate::PerfCounter,
+    pub execute_command_buffer_perf: crate::PerfCounter,
+    pub cleanup: crate::PerfCounter,
+    pub acquire_next_image_perf: crate::PerfCounter,
 }
 
 impl RenderContext {
@@ -83,7 +90,7 @@ impl RenderContext {
                 gpu.device.clone(),
                 surface.clone(),
                 SwapchainCreateInfo {
-                    min_image_count: surface_capabilities.min_image_count.max(3),
+                    min_image_count: surface_capabilities.min_image_count.max(2),
                     image_format,
                     image_extent: window_size.into(),
                     image_usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_DST,
@@ -92,12 +99,13 @@ impl RenderContext {
                         .into_iter()
                         .next()
                         .unwrap(),
-                    present_mode: vulkano::swapchain::PresentMode::Mailbox,
+                    present_mode: vulkano::swapchain::PresentMode::Immediate,
                     ..Default::default()
                 },
             )
             .unwrap()
         };
+        println!("Swapchain image count: {}", swapchain.image_count());
         let image = Image::new(
             gpu.mem_alloc.clone(),
             ImageCreateInfo {
@@ -216,6 +224,13 @@ impl RenderContext {
             camera,
             input: crate::input::Input::new(),
             focused: false,
+            frame_time: crate::PerfCounter::new(),
+            swap_chain_perf: crate::PerfCounter::new(),
+            update_camera_perf: crate::PerfCounter::new(),
+            build_command_buffer_perf: crate::PerfCounter::new(),
+            execute_command_buffer_perf: crate::PerfCounter::new(),
+            cleanup: crate::PerfCounter::new(),
+            acquire_next_image_perf: crate::PerfCounter::new(),
         }
     }
 

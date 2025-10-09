@@ -111,6 +111,7 @@ pub struct GPUManager {
     pub storage_alloc: Arc<SubbufferAllocator>,
     pub work_queue: GPUWorkQueue,
     pub surface_format: Format,
+    pub image_count: u32,
 }
 
 // pub type GPUWorkQueue = Arc<Mutex<Vec<Arc<dyn GPUWorkItemBase>>>>;
@@ -245,6 +246,10 @@ impl GPUManager {
             .surface_formats(&surface, Default::default())
             .unwrap()[0]
             .0;
+         let surface_capabilities = device
+                .physical_device()
+                .surface_capabilities(&surface, Default::default())
+                .unwrap();
 
         Arc::new(Self {
             instance,
@@ -258,6 +263,7 @@ impl GPUManager {
             storage_alloc: Arc::new(storage_alloc),
             work_queue: GPUWorkQueue::new(),
             surface_format,
+            image_count: surface_capabilities.min_image_count.max(2),
         })
     }
 

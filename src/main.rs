@@ -188,7 +188,7 @@ impl App {
 
         let mut builder = gpu.create_command_buffer(CommandBufferUsage::OneTimeSubmit);
 
-        transform_compute.update_transforms(&gpu, &transform_hierarchy, &mut builder);
+        let (updated, staging_buffer_index) = transform_compute.update_transforms(&gpu, &transform_hierarchy, &mut builder);
         let command_buffer = builder.build().unwrap();
 
         // execute buffer copies and global compute shaders
@@ -201,7 +201,7 @@ impl App {
                 .then_signal_semaphore()
                 .then_execute(
                     gpu.queue.clone(),
-                    transform_compute.command_buffer.as_ref().unwrap().clone(),
+                    transform_compute.command_buffer[staging_buffer_index].clone(),
                 )
                 .unwrap()
                 .then_signal_semaphore()
@@ -347,9 +347,9 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                rcx.cleanup.start();
-                self.previous_frame_end.as_mut().unwrap().cleanup_finished();
-                rcx.cleanup.stop();
+                // rcx.cleanup.start();
+                // self.previous_frame_end.as_mut().unwrap().cleanup_finished();
+                // rcx.cleanup.stop();
 
                 rcx.swap_chain_perf.start();
                 if rcx.recreate_swapchain {
@@ -486,12 +486,13 @@ impl ApplicationHandler for App {
         self.asset_manager.process_deferred_queue();
         self.gpu.process_work_queue();
 
+        self.previous_frame_end.as_mut().unwrap().cleanup_finished();
         // build command buffer to update buffers
         let mut builder = self
             .gpu
             .create_command_buffer(CommandBufferUsage::OneTimeSubmit);
 
-        let transforms_updated = self.transform_compute.update_transforms(
+        let (updated, staging_buffer_index) = self.transform_compute.update_transforms(
             &self.gpu,
             &self.transform_hierarchy,
             &mut builder,
@@ -517,9 +518,7 @@ impl ApplicationHandler for App {
                 .then_execute(
                     self.gpu.queue.clone(),
                     self.transform_compute
-                        .command_buffer
-                        .as_ref()
-                        .unwrap()
+                        .command_buffer[staging_buffer_index]
                         .clone(),
                 )
                 .unwrap()
@@ -531,7 +530,7 @@ impl ApplicationHandler for App {
             .asset_manager
             .rebuild_command_buffer
             .load(std::sync::atomic::Ordering::SeqCst)
-            || transforms_updated
+            || updated
         {
             for (_window_id, rcx) in self.rcxs.iter_mut() {
                 rcx.command_buffer = None;

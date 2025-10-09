@@ -124,11 +124,11 @@ impl TransformBuffers {
     }
 }
 
-struct TransformStagingBuffers {
+struct TransformUpdateBuffers {
     position: Subbuffer<[[f32; 3]]>,
     rotation: Subbuffer<[[f32; 4]]>,
     scale: Subbuffer<[[f32; 3]]>,
-    parent: Subbuffer<[u32]>,
+    // parent: Subbuffer<[u32]>,
     // position_flags: Subbuffer<[u32]>,
     // rotation_flags: Subbuffer<[u32]>,
     // scale_flags: Subbuffer<[u32]>,
@@ -136,73 +136,46 @@ struct TransformStagingBuffers {
     flags: Subbuffer<[u32]>,
 }
 
-impl TransformStagingBuffers {
+impl TransformUpdateBuffers {
     fn new(gpu: &GPUManager) -> Self {
-        let position: Subbuffer<[[f32; 3]]> = gpu.buffer_array(
-            1,
-            MemoryTypeFilter::PREFER_DEVICE,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-        );
-        let rotation: Subbuffer<[[f32; 4]]> = gpu.buffer_array(
-            1,
-            MemoryTypeFilter::PREFER_DEVICE,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-        );
-        let scale: Subbuffer<[[f32; 3]]> = gpu.buffer_array(
-            1,
-            MemoryTypeFilter::PREFER_DEVICE,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-        );
-        let parent: Subbuffer<[u32]> = gpu.buffer_array(
-            2,
-            MemoryTypeFilter::PREFER_DEVICE,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-        );
-        let flags: Subbuffer<[u32]> = gpu.buffer_array(
-            3,
-            MemoryTypeFilter::PREFER_DEVICE,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-        );
+        let mem_filter: MemoryTypeFilter =
+            MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE;
+        let usage: BufferUsage =
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC;
+        let position: Subbuffer<[[f32; 3]]> = gpu.buffer_array(1, mem_filter, usage);
+        let rotation: Subbuffer<[[f32; 4]]> = gpu.buffer_array(1, mem_filter, usage);
+        let scale: Subbuffer<[[f32; 3]]> = gpu.buffer_array(1, mem_filter, usage);
+        // let parent: Subbuffer<[u32]> = gpu.buffer_array(2, mem_filter, usage);
+        let flags: Subbuffer<[u32]> = gpu.buffer_array(3, mem_filter, usage);
         Self {
             position,
             rotation,
             scale,
-            parent,
+            // parent,
             flags,
         }
     }
 
     fn resize(&mut self, gpu: &GPUManager, new_size: u64) {
+        let mem_filter: MemoryTypeFilter =
+            MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE;
+        let usage: BufferUsage =
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC;
+
         if self.position.len() < new_size {
             // let new_size = new_size.next_power_of_two() * 10;
             let new_size = new_size.next_power_of_two();
             self.flags = gpu.buffer_array(
                 new_size.div_ceil(32).mul(3), // 1 bit per pos, rot, scale
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+                mem_filter,
+                usage,
             );
 
             let new_size = new_size.next_power_of_two();
-            self.position = gpu.buffer_array(
-                new_size,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-            );
-            self.rotation = gpu.buffer_array(
-                new_size,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-            );
-            self.scale = gpu.buffer_array(
-                new_size,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-            );
-            self.parent = gpu.buffer_array(
-                new_size * 2,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-            );
+            self.position = gpu.buffer_array(new_size, mem_filter, usage);
+            self.rotation = gpu.buffer_array(new_size, mem_filter, usage);
+            self.scale = gpu.buffer_array(new_size, mem_filter, usage);
+            // self.parent = gpu.buffer_array(new_size * 2, mem_filter, usage);
         }
     }
 }
@@ -268,9 +241,12 @@ pub struct TransformCompute {
     pipeline: Arc<ComputePipeline>,
     pub model_matrix_buffer: Subbuffer<[[[f32; 4]; 4]]>,
     transform_buffers: TransformBuffers,
-    staging_buffers: TransformStagingBuffers,
+    // update_buffers: TransformUpdateBuffers,
+    parent_updates: Subbuffer<[u32]>,
+    staging_buffers: Vec<TransformUpdateBuffers>, // TODO: zero flags in shader/avoid writing 0s to flags
+    pub staging_buffer_index: usize,
     pub perf_counters: PerfCounters,
-    pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
+    pub command_buffer: Vec<Arc<PrimaryAutoCommandBuffer>>,
     pub pc: [Subbuffer<cs::PushConstants>; 3],
 }
 
@@ -304,14 +280,23 @@ impl TransformCompute {
             pipeline,
             model_matrix_buffer,
             transform_buffers: TransformBuffers::new(gpu),
-            staging_buffers: TransformStagingBuffers::new(gpu),
+            // update_buffers: TransformUpdateBuffers::new(gpu),
+            parent_updates: gpu.buffer_array(
+                1,
+                MemoryTypeFilter::PREFER_DEVICE,
+                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+            ),
+            staging_buffers: (0..gpu.image_count as usize)
+                .map(|_| TransformUpdateBuffers::new(gpu))
+                .collect(),
+            staging_buffer_index: 0,
             perf_counters: PerfCounters {
                 allocate_bufs: PerfCounter::new(),
                 update_bufs: PerfCounter::new(),
                 compute: PerfCounter::new(),
                 update_parents: PerfCounter::new(),
             },
-            command_buffer: None,
+            command_buffer: Vec::new(),
             pc: [
                 gpu.buffer_from_data(
                     &cs::PushConstants { stage: 0, count: 0 },
@@ -334,25 +319,10 @@ impl TransformCompute {
         gpu: &GPUManager,
         hierarchy: &TransformHierarchy,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-    ) -> bool {
-        self.perf_counters.allocate_bufs.start();
-        let pos_buffer: Subbuffer<[[f32; 3]]> = gpu
-            .storage_alloc
-            .allocate_slice(hierarchy.positions.len() as u64)
-            .unwrap();
-        let rot_buffer: Subbuffer<[[f32; 4]]> = gpu
-            .storage_alloc
-            .allocate_slice(hierarchy.rotations.len() as u64)
-            .unwrap();
-        let scale_buffer: Subbuffer<[[f32; 3]]> = gpu
-            .storage_alloc
-            .allocate_slice(hierarchy.scales.len() as u64)
-            .unwrap();
-        let flags: Subbuffer<[u32]> = gpu
-            .storage_alloc
-            .allocate_slice(hierarchy.metadata.len().div_ceil(32) as u64 * 3) // 1 bit per pos, rot, scale
-            .unwrap();
+    ) -> (bool, usize) {
+        let sbi = self.staging_buffer_index;
 
+        self.perf_counters.allocate_bufs.start();
         let pc1: Subbuffer<cs::PushConstants> = gpu.sub_alloc.allocate_sized().unwrap();
         let pc2: Subbuffer<cs::PushConstants> = gpu.sub_alloc.allocate_sized().unwrap();
         let pc3: Subbuffer<cs::PushConstants> = gpu.sub_alloc.allocate_sized().unwrap();
@@ -364,8 +334,16 @@ impl TransformCompute {
         if self.model_matrix_buffer.len() < hierarchy.positions.len() as u64 {
             self.transform_buffers
                 .resize(gpu, hierarchy.metadata.len() as u64);
-            self.staging_buffers
-                .resize(gpu, hierarchy.metadata.len() as u64);
+            // self.update_buffers
+            //     .resize(gpu, hierarchy.metadata.len() as u64);
+            self.parent_updates = gpu.buffer_array(
+                (hierarchy.metadata.len() * 2).max(1) as u64,
+                MemoryTypeFilter::PREFER_DEVICE,
+                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+            );
+            for buf in &mut self.staging_buffers {
+                buf.resize(gpu, hierarchy.metadata.len() as u64);
+            }
             self.model_matrix_buffer = gpu.buffer_array(
                 hierarchy.metadata.len().next_power_of_two() as u64,
                 MemoryTypeFilter::PREFER_DEVICE,
@@ -377,11 +355,11 @@ impl TransformCompute {
             ret = true;
         }
         self.perf_counters.update_bufs.start();
-        let (parent_updates_len, parent_updates) ={
-            let pos_cell = SyncUnsafeCell::new(pos_buffer.write().unwrap());
-            let rot_cell = SyncUnsafeCell::new(rot_buffer.write().unwrap());
-            let scale_cell = SyncUnsafeCell::new(scale_buffer.write().unwrap());
-            let flags_cell = SyncUnsafeCell::new(flags.write().unwrap());
+        let (parent_updates_len, parent_updates) = {
+            let pos_cell = SyncUnsafeCell::new(self.staging_buffers[sbi].position.write().unwrap());
+            let rot_cell = SyncUnsafeCell::new(self.staging_buffers[sbi].rotation.write().unwrap());
+            let scale_cell = SyncUnsafeCell::new(self.staging_buffers[sbi].scale.write().unwrap());
+            let flags_cell = SyncUnsafeCell::new(self.staging_buffers[sbi].flags.write().unwrap());
             let _hierarchy = SyncUnsafeCell::new(hierarchy);
 
             let pos = &pos_cell;
@@ -496,134 +474,117 @@ impl TransformCompute {
             };
         }
 
-        if self.command_buffer.is_none() || ret {
-            let mut builder = gpu.create_command_buffer(CommandBufferUsage::SimultaneousUse);
+        if self.command_buffer.is_empty() || ret {
+            self.command_buffer.clear();
+            for buf in &mut self.staging_buffers {
+                let mut builder = gpu.create_command_buffer(CommandBufferUsage::SimultaneousUse);
 
-            let layout0 = self.pipeline.layout().set_layouts().get(0).unwrap();
-            let set = DescriptorSet::new(
-                gpu.desc_alloc.clone(),
-                layout0.clone(),
-                [
-                    WriteDescriptorSet::buffer(0, self.transform_buffers.position.clone()),
-                    WriteDescriptorSet::buffer(1, self.transform_buffers.rotation.clone()),
-                    WriteDescriptorSet::buffer(2, self.transform_buffers.scale.clone()),
-                    WriteDescriptorSet::buffer(3, self.transform_buffers.parent.clone()),
-                ],
-                [],
-            )
-            .unwrap();
-            let layout1 = self.pipeline.layout().set_layouts().get(1).unwrap();
-            let set1 = DescriptorSet::new(
-                gpu.desc_alloc.clone(),
-                layout1.clone(),
-                [
-                    WriteDescriptorSet::buffer(0, self.staging_buffers.position.clone()),
-                    WriteDescriptorSet::buffer(1, self.staging_buffers.rotation.clone()),
-                    WriteDescriptorSet::buffer(2, self.staging_buffers.scale.clone()),
-                    WriteDescriptorSet::buffer(3, self.staging_buffers.flags.clone()),
-                    WriteDescriptorSet::buffer(4, self.staging_buffers.parent.clone()),
-                ],
-                [],
-            )
-            .unwrap();
+                let layout0 = self.pipeline.layout().set_layouts().get(0).unwrap();
+                let set = DescriptorSet::new(
+                    gpu.desc_alloc.clone(),
+                    layout0.clone(),
+                    [
+                        WriteDescriptorSet::buffer(0, self.transform_buffers.position.clone()),
+                        WriteDescriptorSet::buffer(1, self.transform_buffers.rotation.clone()),
+                        WriteDescriptorSet::buffer(2, self.transform_buffers.scale.clone()),
+                        WriteDescriptorSet::buffer(3, self.transform_buffers.parent.clone()),
+                    ],
+                    [],
+                )
+                .unwrap();
+                let layout1 = self.pipeline.layout().set_layouts().get(1).unwrap();
+                let set1 = DescriptorSet::new(
+                    gpu.desc_alloc.clone(),
+                    layout1.clone(),
+                    [
+                        WriteDescriptorSet::buffer(0, buf.position.clone()),
+                        WriteDescriptorSet::buffer(1, buf.rotation.clone()),
+                        WriteDescriptorSet::buffer(2, buf.scale.clone()),
+                        WriteDescriptorSet::buffer(3, buf.flags.clone()),
+                        WriteDescriptorSet::buffer(4, self.parent_updates.clone()),
+                    ],
+                    [],
+                )
+                .unwrap();
 
-            let layout2 = self.pipeline.layout().set_layouts().get(2).unwrap();
-            let set2 = DescriptorSet::new(
-                gpu.desc_alloc.clone(),
-                layout2.clone(),
-                [WriteDescriptorSet::buffer(
-                    0,
-                    self.model_matrix_buffer.clone(),
-                )],
-                [],
-            )
-            .unwrap();
-
-            let layout3 = self.pipeline.layout().set_layouts().get(3).unwrap();
-            let set3_0 = DescriptorSet::new(
-                gpu.desc_alloc.clone(),
-                layout3.clone(),
-                [WriteDescriptorSet::buffer(0, self.pc[0].clone())],
-                [],
-            )
-            .unwrap();
-            let set3_1 = DescriptorSet::new(
-                gpu.desc_alloc.clone(),
-                layout3.clone(),
-                [WriteDescriptorSet::buffer(0, self.pc[1].clone())],
-                [],
-            )
-            .unwrap();
-            let set3_2 = DescriptorSet::new(
-                gpu.desc_alloc.clone(),
-                layout3.clone(),
-                [WriteDescriptorSet::buffer(0, self.pc[2].clone())],
-                [],
-            )
-            .unwrap();
-
-            unsafe {
-                builder
-                    .bind_pipeline_compute(self.pipeline.clone())
-                    .unwrap()
-                    .bind_descriptor_sets(
-                        vulkano::pipeline::PipelineBindPoint::Compute,
-                        self.pipeline.layout().clone(),
+                let layout2 = self.pipeline.layout().set_layouts().get(2).unwrap();
+                let set2 = DescriptorSet::new(
+                    gpu.desc_alloc.clone(),
+                    layout2.clone(),
+                    [WriteDescriptorSet::buffer(
                         0,
-                        (set.clone(), set1.clone(), set2.clone(), set3_0),
-                    )
-                    .unwrap()
-                    .dispatch([
-                        self.model_matrix_buffer.len().div_ceil(32).div_ceil(64) as u32,
-                        1,
-                        1,
-                    ])
-                    .unwrap()
-                    .bind_descriptor_sets(
-                        vulkano::pipeline::PipelineBindPoint::Compute,
-                        self.pipeline.layout().clone(),
-                        0,
-                        (set.clone(), set1.clone(), set2.clone(), set3_1),
-                    )
-                    .unwrap()
-                    .dispatch([self.model_matrix_buffer.len().div_ceil(64) as u32, 1, 1])
-                    .unwrap()
-                    .bind_descriptor_sets(
-                        vulkano::pipeline::PipelineBindPoint::Compute,
-                        self.pipeline.layout().clone(),
-                        0,
-                        (set, set1, set2, set3_2),
-                    )
-                    .unwrap()
-                    .dispatch([hierarchy.metadata.len().div_ceil(64) as u32, 1, 1])
-                    .unwrap()
-            };
-            self.command_buffer = Some(builder.build().unwrap());
+                        self.model_matrix_buffer.clone(),
+                    )],
+                    [],
+                )
+                .unwrap();
+
+                let layout3 = self.pipeline.layout().set_layouts().get(3).unwrap();
+                let set3_0 = DescriptorSet::new(
+                    gpu.desc_alloc.clone(),
+                    layout3.clone(),
+                    [WriteDescriptorSet::buffer(0, self.pc[0].clone())],
+                    [],
+                )
+                .unwrap();
+                let set3_1 = DescriptorSet::new(
+                    gpu.desc_alloc.clone(),
+                    layout3.clone(),
+                    [WriteDescriptorSet::buffer(0, self.pc[1].clone())],
+                    [],
+                )
+                .unwrap();
+                let set3_2 = DescriptorSet::new(
+                    gpu.desc_alloc.clone(),
+                    layout3.clone(),
+                    [WriteDescriptorSet::buffer(0, self.pc[2].clone())],
+                    [],
+                )
+                .unwrap();
+
+                unsafe {
+                    builder
+                        .bind_pipeline_compute(self.pipeline.clone())
+                        .unwrap()
+                        .bind_descriptor_sets(
+                            vulkano::pipeline::PipelineBindPoint::Compute,
+                            self.pipeline.layout().clone(),
+                            0,
+                            (set.clone(), set1.clone(), set2.clone(), set3_0),
+                        )
+                        .unwrap()
+                        .dispatch([
+                            self.model_matrix_buffer.len().div_ceil(32).div_ceil(64) as u32,
+                            1,
+                            1,
+                        ])
+                        .unwrap()
+                        .bind_descriptor_sets(
+                            vulkano::pipeline::PipelineBindPoint::Compute,
+                            self.pipeline.layout().clone(),
+                            0,
+                            (set.clone(), set1.clone(), set2.clone(), set3_1),
+                        )
+                        .unwrap()
+                        .dispatch([self.model_matrix_buffer.len().div_ceil(64) as u32, 1, 1])
+                        .unwrap()
+                        .bind_descriptor_sets(
+                            vulkano::pipeline::PipelineBindPoint::Compute,
+                            self.pipeline.layout().clone(),
+                            0,
+                            (set, set1, set2, set3_2),
+                        )
+                        .unwrap()
+                        .dispatch([hierarchy.metadata.len().div_ceil(64) as u32, 1, 1])
+                        .unwrap()
+                };
+                self.command_buffer.push(builder.build().unwrap());
+            }
         }
         builder
             .copy_buffer(CopyBufferInfo::buffers(
-                flags.clone(),
-                self.staging_buffers.flags.clone(),
-            ))
-            .unwrap()
-            .copy_buffer(CopyBufferInfo::buffers(
-                pos_buffer.clone(),
-                self.staging_buffers.position.clone(),
-            ))
-            .unwrap()
-            .copy_buffer(CopyBufferInfo::buffers(
-                rot_buffer.clone(),
-                self.staging_buffers.rotation.clone(),
-            ))
-            .unwrap()
-            .copy_buffer(CopyBufferInfo::buffers(
-                scale_buffer.clone(),
-                self.staging_buffers.scale.clone(),
-            ))
-            .unwrap()
-            .copy_buffer(CopyBufferInfo::buffers(
                 parent_updates.clone(),
-                self.staging_buffers.parent.clone(),
+                self.parent_updates.clone(),
             ))
             .unwrap()
             .copy_buffer(CopyBufferInfo::buffers(pc1.clone(), self.pc[0].clone()))
@@ -633,6 +594,7 @@ impl TransformCompute {
             .copy_buffer(CopyBufferInfo::buffers(pc3.clone(), self.pc[2].clone()))
             .unwrap();
         self.perf_counters.compute.stop();
-        ret
+        self.staging_buffer_index = (self.staging_buffer_index + 1) % self.staging_buffers.len();
+        (ret, sbi)
     }
 }

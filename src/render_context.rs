@@ -90,7 +90,7 @@ impl RenderContext {
                 gpu.device.clone(),
                 surface.clone(),
                 SwapchainCreateInfo {
-                    min_image_count: surface_capabilities.min_image_count.max(2),
+                    min_image_count: gpu.image_count,
                     image_format,
                     image_extent: window_size.into(),
                     image_usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_DST,

@@ -1,9 +1,14 @@
 use downcast_rs::{Downcast, DowncastSend, DowncastSync, impl_downcast};
 use parking_lot::Mutex;
 use std::{
-    any::{Any, TypeId}, collections::HashMap, ops::Mul, path::Path, sync::{
-        atomic::{AtomicBool, Ordering}, Arc
-    }
+    any::{Any, TypeId},
+    collections::HashMap,
+    ops::Mul,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
 };
 use vulkano::buffer::BufferUsage;
 
@@ -17,14 +22,17 @@ use crate::{
 // reference counting of loaded assets
 // references to assets that are unloaded default to a placeholder asset
 pub trait Asset: Downcast + DowncastSend + DowncastSync + Send + Sync {
-    fn load_from_file(path: impl AsRef<Path>, gpu: GPUWorkQueue, asset: DeferredAssetQueue) -> Result<Self, String>
+    fn load_from_file(
+        path: impl AsRef<Path>,
+        gpu: GPUWorkQueue,
+        asset: DeferredAssetQueue,
+    ) -> Result<Self, String>
     where
         Self: Sized;
     fn as_any(&self) -> &dyn Any;
 }
 
 impl_downcast!(sync Asset);
-
 
 trait AssetWorkItemBase {
     fn is_completed(&self) -> bool;
@@ -51,7 +59,7 @@ where
     }
 }
 
-impl<T> AssetWorkItem<T> 
+impl<T> AssetWorkItem<T>
 where
     T: Asset + 'static,
 {
@@ -68,7 +76,6 @@ where
         self.completed.store(true, Ordering::SeqCst);
     }
 }
-
 
 pub struct DeferredAssetQueue {
     // queue of assets to load
@@ -111,16 +118,19 @@ pub struct AssetManager {
     thread_pool: Arc<rayon::ThreadPool>,
     gpu: Arc<GPUManager>,
     // loaded_objs: Arc<Mutex<HashMap<String, Arc<dyn Asset>>>>,
-    loaded_assets: Arc<Mutex<HashMap<TypeId, HashMap<String, Arc<dyn Asset>>>>>,
-    placeholder_assets: Arc<Mutex<HashMap<TypeId, Arc<dyn Asset>>>>,
+    next_asset_id: AtomicU32,
+    loaded_assets_files: Arc<Mutex<HashMap<TypeId, HashMap<String, u32>>>>,
+    loaded_assets: Arc<Mutex<HashMap<TypeId, HashMap<u32, Arc<dyn Asset>>>>>,
+    pub placeholder_assets: Arc<Mutex<HashMap<TypeId, Arc<dyn Asset>>>>,
     // placeholder_obj: Arc<dyn Asset>,
     pub rebuild_command_buffer: Arc<AtomicBool>,
     pub deferred_queue: DeferredAssetQueue,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AssetHandle<T> {
-    asset: String,
+    // asset: String,
+    pub asset_id: u32,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -130,12 +140,12 @@ where
 {
     fn default() -> Self {
         Self {
-            asset: String::new(),
+            // asset: String::new(),
+            asset_id: 0,
             _marker: std::marker::PhantomData,
         }
     }
 }
-
 
 impl AssetManager {
     pub fn new(gpu: Arc<GPUManager>) -> Self {
@@ -147,8 +157,10 @@ impl AssetManager {
                     .build()
                     .unwrap(),
             ),
+            next_asset_id: AtomicU32::new(1),
             gpu,
             // loaded_objs: Arc::new(Mutex::new(HashMap::new())),
+            loaded_assets_files: Arc::new(Mutex::new(HashMap::new())),
             loaded_assets: Arc::new(Mutex::new(HashMap::new())),
             placeholder_assets: Arc::new(Mutex::new(HashMap::new())),
             // placeholder_obj: Arc::new(placeholder_obj),
@@ -214,30 +226,52 @@ impl AssetManager {
     //     //     }
     //     // }
     // }
-    pub fn set_placeholder_asset<T: Asset + 'static>(&mut self, asset: T) {
+    pub fn set_placeholder_asset<T: Asset + 'static>(&mut self, asset: T) -> Arc<T> {
         let type_id = TypeId::of::<T>();
         let arc_asset = Arc::new(asset);
-        self.placeholder_assets
-            .lock()
-            .insert(type_id, arc_asset);
+        self.placeholder_assets.lock().insert(type_id, arc_asset.clone());
         self.loaded_assets
             .lock()
             .entry(type_id)
             .or_insert_with(HashMap::new);
+        arc_asset
     }
     pub fn load_asset<T: Asset + 'static>(&mut self, path: &str) -> AssetHandle<T> {
         let type_id = TypeId::of::<T>();
-        if let Some(assets) = self.loaded_assets.lock().get(&type_id) {
-            if let Some(_) = assets.get(path) {
-                return AssetHandle {
-                    asset: path.to_string(),
+        let ret = if let Some(assets) = self.loaded_assets_files.lock().get(&type_id) {
+            if let Some(id) = assets.get(path) {
+                AssetHandle {
+                    // asset: path.to_string(),
+                    asset_id: *id,
                     _marker: std::marker::PhantomData,
-                };
+                }
+            } else {
+                // insert new id for this asset path
+                let new_id = self.next_asset_id.fetch_add(1, Ordering::SeqCst);
+                self.loaded_assets_files
+                    .lock()
+                    .get_mut(&type_id)
+                    .unwrap()
+                    .insert(path.to_string(), new_id);
+                AssetHandle {
+                    // asset: path.to_string(),
+                    asset_id: new_id,
+                    _marker: std::marker::PhantomData,
+                }
             }
-        }
-        let handle: AssetHandle<T> = AssetHandle {
-            asset: path.to_string(),
-            _marker: std::marker::PhantomData,
+        } else {
+            // insert new id for this asset path
+            let new_id = self.next_asset_id.fetch_add(1, Ordering::SeqCst);
+            self.loaded_assets_files
+                .lock()
+                .entry(type_id)
+                .or_insert_with(HashMap::new)
+                .insert(path.to_string(), new_id);
+            AssetHandle {
+                // asset: path.to_string(),
+                asset_id: new_id,
+                _marker: std::marker::PhantomData,
+            }
         };
         let path = path.to_string();
         let gpu = self.gpu.work_queue.clone();
@@ -245,13 +279,14 @@ impl AssetManager {
         let loaded_assets = self.loaded_assets.clone();
         let placeholder_assets = self.placeholder_assets.clone();
         let rebuild_command_buffer = self.rebuild_command_buffer.clone();
+        let asset_id = ret.asset_id;
         self.thread_pool.spawn(move || {
             match T::load_from_file(&path, gpu, deferred_queue) {
                 Ok(asset) => {
                     let arc_asset = Arc::new(asset);
                     let mut assets_lock = loaded_assets.lock();
                     let assets = assets_lock.entry(type_id).or_insert_with(HashMap::new);
-                    assets.insert(path.clone(), arc_asset);
+                    assets.insert(asset_id, arc_asset);
                     rebuild_command_buffer.store(true, Ordering::SeqCst);
                 }
                 Err(_) => {
@@ -259,12 +294,12 @@ impl AssetManager {
                     if let Some(placeholder) = placeholder_assets.lock().get(&type_id) {
                         let mut assets_lock = loaded_assets.lock();
                         let assets = assets_lock.entry(type_id).or_insert_with(HashMap::new);
-                        assets.insert(path.clone(), placeholder.clone());
+                        assets.insert(asset_id, placeholder.clone());
                     }
                 }
             }
         });
-        handle
+        ret
     }
 }
 
@@ -275,7 +310,7 @@ impl<T> AssetHandle<T> {
     {
         let type_id = TypeId::of::<T>();
         if let Some(assets) = manager.loaded_assets.lock().get(&type_id) {
-            if let Some(asset) = assets.get(&self.asset) {
+            if let Some(asset) = assets.get(&self.asset_id) {
                 if let Ok(concrete_asset) = Arc::clone(asset).downcast_arc::<T>() {
                     return concrete_asset;
                 } else {
@@ -308,5 +343,13 @@ impl<T> AssetHandle<T> {
         // } else {
         //     panic!("Failed to downcast placeholder asset to type T");
         // }
+    }
+
+    pub fn _from_id(asset_id: u32) -> Self {
+        Self {
+            // asset: String::new(),
+            asset_id,
+            _marker: std::marker::PhantomData,
+        }
     }
 }

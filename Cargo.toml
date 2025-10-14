@@ -4,13 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [profile.release]
-# opt-level = 3
+opt-level = 3
 # lto = "fat"
 # panic = "abort"
 # codegen-units = 1
+# debug = true
+
+[profile.dev]
+# opt-level = 2
 debug = true
 
 [dependencies]
+dary_heap = "0.3.8"
 downcast-rs = "2.0.2"
 egui = { version = "0.31.1", features = ["rayon", "persistence"] }
 egui_winit_vulkano = "0.28.0"

@@ -1,12 +1,26 @@
-use std::{path::Path, sync::{atomic::AtomicBool, Arc}};
+use std::{
+    path::Path,
+    sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}},
+};
 
 use parking_lot::Mutex;
 use vulkano::buffer::{BufferUsage, Subbuffer};
 
-use crate::{asset_manager::{Asset, AssetHandle, DeferredAssetQueue}, gpu_manager::{GPUManager, GPUWorkQueue}, texture::Texture};
+use crate::{
+    asset_manager::{Asset, AssetHandle, DeferredAssetQueue},
+    gpu_manager::{GPUManager, GPUWorkQueue},
+    texture::Texture,
+};
 
+// static OBJ_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
 #[derive(Debug, Clone)]
 pub struct Obj {
+    // pub id: u32,
+    pub meshes: Vec<Mesh>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Mesh {
     pub vertices: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub tex_coords: Vec<[f32; 2]>,
@@ -19,7 +33,6 @@ pub struct Obj {
     pub index_buffer: Subbuffer<[u32]>,
     pub texture: Arc<Mutex<Option<AssetHandle<Texture>>>>,
 }
-
 
 impl Asset for Obj {
     /// Load an OBJ file from the given path
@@ -39,18 +52,20 @@ impl Asset for Obj {
                 triangulate: true,
                 ..Default::default()
             },
-        ).map_err(|e| format!("Failed to load OBJ file: {}", e))?;
+        )
+        .map_err(|e| format!("Failed to load OBJ file: {}", e))?;
         let materials = _materials.expect("Failed to load materials");
 
-        let mut vertices = Vec::new();
-        let mut normals = Vec::new();
-        let mut tex_coords = Vec::new();
-        let mut indices = Vec::new();
-
+        let mut meshes = Vec::new();
         // Process all models in the OBJ file
         for model in models {
+            let mut vertices = Vec::new();
+            let mut normals = Vec::new();
+            let mut tex_coords = Vec::new();
+            let mut indices = Vec::new();
+
             let mesh = model.mesh;
-            let index_offset = vertices.len() as u32;
+            // let index_offset = vertices.len() as u32;
 
             // Process vertices (positions)
             for i in (0..mesh.positions.len()).step_by(3) {
@@ -87,96 +102,86 @@ impl Asset for Obj {
 
             // Process indices with offset for multiple models
             for index in mesh.indices {
-                indices.push(index + index_offset);
+                indices.push(index);
             }
-        }
 
-        println!(
-            "Loaded OBJ: {} vertices, {} normals, {} tex_coords, {} indices",
-            vertices.len(),
-            normals.len(),
-            tex_coords.len(),
-            indices.len()
-        );
+            let verts = vertices.clone();
+            let norms = normals.clone();
+            let texs = tex_coords.clone();
+            let inds = indices.clone();
 
-        let verts = vertices.clone();
-        let norms = normals.clone();
-        let texs = tex_coords.clone();
-        let inds = indices.clone();
+            println!("Creating GPU buffers for OBJ");
+            let vertex_buffer = gpu
+                .enqueue_work(move |g| {
+                    g.buffer_from_iter(verts.iter().cloned(), BufferUsage::VERTEX_BUFFER)
+                })
+                .wait()
+                .unwrap();
+            println!("Created vertex buffer");
+            let normal_buffer = gpu
+                .enqueue_work(move |g| {
+                    g.buffer_from_iter(norms.iter().cloned(), BufferUsage::VERTEX_BUFFER)
+                })
+                .wait()
+                .unwrap();
+            println!("Created normal buffer");
+            let tex_coord_buffer = gpu
+                .enqueue_work(move |g| {
+                    g.buffer_from_iter(texs.iter().cloned(), BufferUsage::VERTEX_BUFFER)
+                })
+                .wait()
+                .unwrap();
+            println!("Created tex coord buffer");
+            let index_buffer = gpu
+                .enqueue_work(move |g| {
+                    g.buffer_from_iter(inds.iter().cloned(), BufferUsage::INDEX_BUFFER)
+                })
+                .wait()
+                .unwrap();
+            println!("Created index buffer");
 
-        println!("Creating GPU buffers for OBJ");
-        let vertex_buffer = gpu
-            .enqueue_work(move |g| {
-                g.buffer_from_iter(verts.iter().cloned(), BufferUsage::VERTEX_BUFFER)
-            })
-            .wait()
-            .unwrap();
-        println!("Created vertex buffer");
-        let normal_buffer = gpu
-            .enqueue_work(move |g| {
-                g.buffer_from_iter(norms.iter().cloned(), BufferUsage::VERTEX_BUFFER)
-            })
-            .wait()
-            .unwrap();
-        println!("Created normal buffer");
-        let tex_coord_buffer = gpu
-            .enqueue_work(move |g| {
-                g.buffer_from_iter(texs.iter().cloned(), BufferUsage::VERTEX_BUFFER)
-            })
-            .wait()
-            .unwrap();
-        println!("Created tex coord buffer");
-        let index_buffer = gpu
-            .enqueue_work(move |g| {
-                g.buffer_from_iter(inds.iter().cloned(), BufferUsage::INDEX_BUFFER)
-            })
-            .wait()
-            .unwrap();
-        println!("Created index buffer");
-
-        let texture = Arc::new(Mutex::new(None));
-        for (i, m) in materials.iter().enumerate() {
-            println!("Material {}: {:?}", i, m.name);
-            if let Some(diffuse_texture) = m.diffuse_texture.clone() {
-                println!("  Diffuse texture: {:?}", diffuse_texture);
-                // texture = Some(asset.enqueue_work(move |a| {
-                //     a.load_asset::<Texture>(&diffuse_texture)
-                // }).wait().unwrap());
-                let tex_path = diffuse_texture.clone();
-                let tex_path = if Path::new(&tex_path).is_absolute() {
-                    tex_path
+            let texture = Arc::new(Mutex::new(None));
+            if let Some(mat_id) = mesh.material_id.as_ref() {
+                if let Some(material) = materials.get(*mat_id) {
+                    if let Some(diffuse_texture) = material.diffuse_texture.clone() {
+                        println!("Loading diffuse texture for mesh: {:?}", diffuse_texture);
+                        let tex_path = if Path::new(&diffuse_texture).is_absolute() {
+                            diffuse_texture
+                        } else {
+                            let mut p = path.parent().unwrap_or(Path::new("")).to_path_buf();
+                            p.push(diffuse_texture);
+                            p.to_string_lossy().to_string()
+                        };
+                        let texture_clone = Arc::clone(&texture);
+                        asset.enqueue_work(move |a| {
+                            let handle = a.load_asset::<Texture>(&tex_path);
+                            *texture_clone.lock() = Some(handle.clone());
+                            handle
+                        });
+                    } else {
+                        println!("No diffuse texture for material {}", mat_id);
+                    }
                 } else {
-                    let mut p = path.parent().unwrap_or(Path::new("")).to_path_buf();
-                    p.push(tex_path);
-                    p.to_string_lossy().to_string()
-                };
-                println!("  Full texture path: {:?}", tex_path);
-                let texture = Arc::clone(&texture);
-                asset.enqueue_work(move |a| {
-                    let handle = a.load_asset::<Texture>(&tex_path);
-                    *texture.lock() = Some(handle.clone());
-                    handle
-                });
-                // asset.enqueue_work::<_, Texture, _>(move |a| {
-                //     let handle = a.load_asset::<Texture>(&tex_path);
-                //     *texture.lock() = Some(handle);
-                // });
-                break; // Load only the first diffuse texture found
+                    println!("Invalid material_id {} for mesh", mat_id);
+                }
+            } else {
+                println!("No material assigned to mesh");
             }
+            let mesh = Mesh {
+                vertices,
+                normals,
+                tex_coords,
+                indices,
+                vertex_buffer,
+                normal_buffer,
+                tex_coord_buffer,
+                index_buffer,
+                texture,
+            };
+            meshes.push(mesh);
         }
 
-        Ok(Self {
-            vertex_buffer,
-            // gpu.buffer_from_iter(vertices.iter().cloned(), BufferUsage::VERTEX_BUFFER),
-            normal_buffer,
-            tex_coord_buffer,
-            index_buffer,
-            vertices,
-            normals,
-            tex_coords,
-            indices,
-            texture,
-        })
+        Ok(Self { meshes })
     }
 
     // /// Create an empty Obj
@@ -212,25 +217,24 @@ impl Obj {
         let tex_coords = vec![[0.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         let indices = vec![0, 1, 2];
 
-        let vertex_buffer = gpu
-            .buffer_from_iter(vertices.iter().cloned(), BufferUsage::VERTEX_BUFFER);
-        let normal_buffer = gpu
-            .buffer_from_iter(normals.iter().cloned(), BufferUsage::VERTEX_BUFFER);
-        let tex_coord_buffer = gpu
-            .buffer_from_iter(tex_coords.iter().cloned(), BufferUsage::VERTEX_BUFFER);
-        let index_buffer = gpu
-            .buffer_from_iter(indices.iter().cloned(), BufferUsage::INDEX_BUFFER);
-
-        Self {
-            vertex_buffer,
-            normal_buffer,
-            tex_coord_buffer,
-            index_buffer,
+        let vertex_buffer =
+            gpu.buffer_from_iter(vertices.iter().cloned(), BufferUsage::VERTEX_BUFFER);
+        let normal_buffer =
+            gpu.buffer_from_iter(normals.iter().cloned(), BufferUsage::VERTEX_BUFFER);
+        let tex_coord_buffer =
+            gpu.buffer_from_iter(tex_coords.iter().cloned(), BufferUsage::VERTEX_BUFFER);
+        let index_buffer = gpu.buffer_from_iter(indices.iter().cloned(), BufferUsage::INDEX_BUFFER);
+        let mesh = Mesh {
             vertices,
             normals,
             tex_coords,
             indices,
+            vertex_buffer,
+            normal_buffer,
+            tex_coord_buffer,
+            index_buffer,
             texture: Arc::new(Mutex::new(None)),
-        }
+        };
+        Self { meshes: vec![mesh] }
     }
 }

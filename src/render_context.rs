@@ -34,7 +34,12 @@ use vulkano::{
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
 use crate::{
-    NUM_CUBES, asset_manager::{AssetHandle, AssetManager}, camera::Camera, gpu_manager::GPUManager, obj_loader::Obj, texture::Texture
+    NUM_CUBES,
+    asset_manager::{AssetHandle, AssetManager},
+    camera::Camera,
+    gpu_manager::GPUManager,
+    obj_loader::Obj,
+    texture::Texture,
 };
 
 pub struct RenderContext {
@@ -259,41 +264,17 @@ impl RenderContext {
         assets: &AssetManager,
         // offsets: &Vec<[f32; 3]>,
         obj_handle: &AssetHandle<Obj>,
-        instance_buffer: Subbuffer<[[[f32; 4]; 4]]>,
+        // instance_buffer: Subbuffer<[[[f32; 4]; 4]]>,
+        rendering_system: &mut crate::renderer::RenderingSystem,
+        model_matrices: Subbuffer<[[[f32; 4]; 4]]>,
     ) {
         let window_size = self.window.inner_size();
 
         let mut camera = self.camera.lock();
         camera.resize(gpu, [window_size.width, window_size.height]);
 
-        let mut builder = AutoCommandBufferBuilder::primary(
-            gpu.cmd_alloc.clone(),
-            gpu.queue.queue_family_index(),
-            CommandBufferUsage::SimultaneousUse,
-        )
-        .unwrap();
-
-        let obj = obj_handle.get(assets);
-        let texture = obj
-            .texture
-            .lock()
-            .as_ref()
-            .unwrap_or(&AssetHandle::<Texture>::default())
-            .get(assets);
-        let set = DescriptorSet::new(
-            gpu.desc_alloc.clone(),
-            self.pipeline.layout().set_layouts().get(0).unwrap().clone(),
-            [
-                WriteDescriptorSet::buffer(0, camera.uniform.clone()),
-                WriteDescriptorSet::image_view_sampler(
-                    1,
-                    texture.image.clone(),
-                    texture.sampler.clone(),
-                ),
-            ],
-            [],
-        )
-        .unwrap();
+        let mut builder = gpu.create_command_buffer(CommandBufferUsage::SimultaneousUse);
+        rendering_system.update_mvp(camera.uniform.clone(), &mut builder, model_matrices);
 
         builder
             .begin_rendering(RenderingInfo {
@@ -315,31 +296,59 @@ impl RenderContext {
             .set_viewport(0, [self.viewport.clone()].into_iter().collect())
             .unwrap()
             .bind_pipeline_graphics(self.pipeline.clone())
-            .unwrap()
-            .bind_descriptor_sets(
-                vulkano::pipeline::PipelineBindPoint::Graphics,
-                self.pipeline.layout().clone(),
-                0,
-                set.clone(),
-            )
-            .unwrap()
-            .bind_vertex_buffers(
-                0,
-                (
-                    obj.vertex_buffer.clone(),
-                    obj.tex_coord_buffer.clone(),
-                    obj.normal_buffer.clone(),
-                    instance_buffer.clone(),
-                ),
-            )
-            .unwrap()
-            .bind_index_buffer(obj.index_buffer.clone())
             .unwrap();
-        unsafe {
-            builder
-                .draw_indexed(obj.index_buffer.len() as u32, NUM_CUBES as u32, 0, 0, 0)
-                .unwrap();
-        }
+
+        rendering_system.draw(&mut builder, assets, self.pipeline.clone());
+        // let obj = obj_handle.get(assets);
+        // for mesh in &obj.meshes {
+        //     println!("Mesh has {} vertices", mesh.vertices.len());
+        //     let texture = mesh
+        //         .texture
+        //         .lock()
+        //         .as_ref()
+        //         .unwrap_or(&AssetHandle::<Texture>::default())
+        //         .get(assets);
+        //     let set = DescriptorSet::new(
+        //         gpu.desc_alloc.clone(),
+        //         self.pipeline.layout().set_layouts().get(0).unwrap().clone(),
+        //         [
+        //             WriteDescriptorSet::buffer(0, camera.uniform.clone()),
+        //             WriteDescriptorSet::image_view_sampler(
+        //                 1,
+        //                 texture.image.clone(),
+        //                 texture.sampler.clone(),
+        //             ),
+        //         ],
+        //         [],
+        //     )
+        //     .unwrap();
+        //     builder
+        //         .bind_descriptor_sets(
+        //             vulkano::pipeline::PipelineBindPoint::Graphics,
+        //             self.pipeline.layout().clone(),
+        //             0,
+        //             set.clone(),
+        //         )
+        //         .unwrap()
+        //         .bind_vertex_buffers(
+        //             0,
+        //             (
+        //                 mesh.vertex_buffer.clone(),
+        //                 mesh.tex_coord_buffer.clone(),
+        //                 mesh.normal_buffer.clone(),
+        //                 instance_buffer.clone(),
+        //             ),
+        //         )
+        //         .unwrap()
+        //         .bind_index_buffer(mesh.index_buffer.clone())
+        //         .unwrap();
+        //     unsafe {
+        //         builder
+        //             .draw_indexed(mesh.index_buffer.len() as u32, NUM_CUBES as u32, 0, 0, 0)
+        //             .unwrap();
+        //     }
+        // }
+
         // for offset in offsets {
         //     unsafe {
         //         builder
@@ -386,7 +395,7 @@ struct MyNormal {
 #[repr(C)]
 struct InstanceMatrix {
     #[format(R32G32B32A32_SFLOAT)]
-    instance_matrix: [[f32; 4]; 4],
+    mvp_matrix: [[f32; 4]; 4],
     // #[format(R32G32B32A32_SFLOAT)]
     // row0: [f32; 4],
     // #[format(R32G32B32A32_SFLOAT)]

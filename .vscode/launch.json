@@ -11,7 +11,6 @@
             "cargo": {
                 "args": [
                     "build",
-                    "-r",
                     "--bin=game_engine_rs_2",
                     "--package=game_engine_rs_2"
                 ],

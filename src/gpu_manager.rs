@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    ops::Sub,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use parking_lot::Mutex;
@@ -23,8 +26,9 @@ use vulkano::{
     format::Format,
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
+    query::{QueryPool, QueryPoolCreateInfo, QueryResultFlags, QueryType},
     swapchain::Surface,
-    sync::GpuFuture,
+    sync::{GpuFuture, PipelineStage},
 };
 use winit::{event_loop::EventLoop, window::Window};
 
@@ -109,9 +113,12 @@ pub struct GPUManager {
     // pub pipeline_cache: Arc<PipelineCache>,
     pub sub_alloc: Arc<SubbufferAllocator>,
     pub storage_alloc: Arc<SubbufferAllocator>,
+    pub ind_alloc: Arc<SubbufferAllocator>,
     pub work_queue: GPUWorkQueue,
     pub surface_format: Format,
     pub image_count: u32,
+    pub query_pool: Arc<QueryPool>,
+    pub empty: Subbuffer<[u8]>,
 }
 
 // pub type GPUWorkQueue = Arc<Mutex<Vec<Arc<dyn GPUWorkItemBase>>>>;
@@ -235,6 +242,16 @@ impl GPUManager {
             },
         );
 
+        let ind_alloc = SubbufferAllocator::new(
+            mem_alloc.clone(),
+            SubbufferAllocatorCreateInfo {
+                buffer_usage: BufferUsage::INDIRECT_BUFFER | BufferUsage::TRANSFER_SRC,
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+        );
+
         let window = Arc::new(
             event_loop
                 .create_window(Window::default_attributes())
@@ -246,14 +263,34 @@ impl GPUManager {
             .surface_formats(&surface, Default::default())
             .unwrap()[0]
             .0;
-         let surface_capabilities = device
-                .physical_device()
-                .surface_capabilities(&surface, Default::default())
-                .unwrap();
+        let surface_capabilities = device
+            .physical_device()
+            .surface_capabilities(&surface, Default::default())
+            .unwrap();
+        let empty = Buffer::new_slice(
+            mem_alloc.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::UNIFORM_BUFFER
+                    | BufferUsage::TRANSFER_SRC
+                    | BufferUsage::STORAGE_BUFFER
+                    | BufferUsage::INDIRECT_BUFFER
+                    | BufferUsage::TRANSFER_DST
+                    | BufferUsage::VERTEX_BUFFER
+                    | BufferUsage::INDEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                ..Default::default()
+            },
+            1,
+        )
+        .unwrap();
 
         Arc::new(Self {
+            empty,
             instance,
-            device,
+            device: device.clone(),
             queue,
             cmd_alloc,
             mem_alloc,
@@ -261,10 +298,63 @@ impl GPUManager {
             // pipeline_cache,
             sub_alloc: Arc::new(sub_alloc),
             storage_alloc: Arc::new(storage_alloc),
+            ind_alloc: Arc::new(ind_alloc),
             work_queue: GPUWorkQueue::new(),
             surface_format,
             image_count: surface_capabilities.min_image_count.max(2),
+            query_pool: QueryPool::new(
+                device.clone(),
+                QueryPoolCreateInfo {
+                    query_count: 1000,
+                    ..QueryPoolCreateInfo::query_type(QueryType::Timestamp)
+                },
+            )
+            .unwrap(),
         })
+    }
+    pub fn begin_query(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        // query_index: u32,
+    ) {
+        unsafe {
+            builder
+                .reset_query_pool(self.query_pool.clone(), 0..2)
+                .unwrap()
+                .write_timestamp(self.query_pool.clone(), 0, PipelineStage::TopOfPipe)
+                .unwrap();
+        }
+    }
+    pub fn end_query(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        // query_index: u32,
+    ) {
+        unsafe {
+            builder
+                .write_timestamp(self.query_pool.clone(), 1, PipelineStage::BottomOfPipe)
+                .unwrap();
+        }
+    }
+
+    pub fn get_query_results(&self) -> u64 {
+        let mut data = [0u64; 2];
+        loop {
+            if let Ok(res) = self
+                .query_pool
+                .get_results(0..2, &mut data, QueryResultFlags::WAIT)
+            {
+                if res {
+                    break;
+                }
+                // res.get_results(&mut query_results, QueryResultFlags::WAIT)
+                //     .unwrap();
+            }
+        }
+
+        // todo!();
+        ((data[1] - data[0]) as f64
+            * self.device.physical_device().properties().timestamp_period as f64) as u64
     }
 
     pub(crate) fn process_work_queue(&self) -> bool {
@@ -355,6 +445,28 @@ impl GPUManager {
             .unwrap();
         // builder.copy_buffer(CopyBufferInfo::buffers()).unwrap();
         buf2
+    }
+    pub fn buffer_data<T>(
+        &self,
+        memory_type_filter: MemoryTypeFilter,
+        usage: BufferUsage,
+    ) -> Subbuffer<T>
+    where
+        T: BufferContents + Copy,
+    {
+        let buf: Subbuffer<T> = Buffer::new_sized(
+            self.mem_alloc.clone(),
+            BufferCreateInfo {
+                usage,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        buf
     }
 
     pub fn buffer_from_data<T>(&self, data: &T, usage: BufferUsage) -> Subbuffer<T>

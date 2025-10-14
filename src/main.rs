@@ -22,8 +22,10 @@ use parking_lot::Mutex;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use render_context::RenderContext;
 use std::{
+    any::TypeId,
     collections::HashMap,
     error::Error,
+    ops::Div,
     sync::{Arc, LazyLock},
     time,
 };
@@ -45,7 +47,10 @@ use winit::{
     window::WindowId,
 };
 
-use crate::transform::{_Transform, compute::PerfCounter};
+use crate::{
+    asset_manager::Asset,
+    transform::{_Transform, compute::PerfCounter},
+};
 
 mod asset_manager;
 mod camera;
@@ -53,8 +58,10 @@ mod gpu_manager;
 mod input;
 mod obj_loader;
 mod render_context;
+mod renderer;
 mod texture;
 mod transform;
+mod util;
 
 fn main() -> Result<(), impl Error> {
     let event_loop = EventLoop::new().unwrap();
@@ -64,7 +71,7 @@ fn main() -> Result<(), impl Error> {
 }
 
 const MAX_FPS_SAMPLE_AGE: f32 = 1.0;
-const NUM_CUBES: usize = 1;
+const NUM_CUBES: usize = 1 << 23; // 1<<22 = 4,194,304
 struct FPS {
     frame_times: std::collections::VecDeque<f32>,
     frame_ages: std::collections::VecDeque<time::Instant>,
@@ -112,11 +119,16 @@ struct App {
     camera: HashMap<WindowId, Arc<Mutex<camera::Camera>>>,
     transform_hierarchy: TransformHierarchy,
     transform_compute: TransformCompute,
+    rendering_system: renderer::RenderingSystem,
+    renderers: Vec<renderer::RendererComponent>,
     // update_transforms: bool,
     transforms_updated: bool,
     // builder: Option<AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>>,
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     frame_time: PerfCounter,
+    update_sim: PerfCounter,
+    paused: bool,
+    update_transforms_compute_shader: bool,
 }
 
 impl App {
@@ -150,13 +162,31 @@ impl App {
         // .unwrap();
         // let cube = obj_loader::Obj::load_from_file("assets/cube/cube.obj", &gpu.lock()).unwrap();
         let mut asset_manager = asset_manager::AssetManager::new(gpu.clone());
-        asset_manager.set_placeholder_asset(Obj::default(&gpu));
+        let default_obj = asset_manager.set_placeholder_asset(Obj::default(&gpu));
         asset_manager.set_placeholder_asset(texture::Texture::default(&gpu));
+        let cube = asset_manager.load_asset::<Obj>("assets/cube/cube.obj");
 
         let mut previous_frame_end = Some(sync::now(gpu.device.clone()).boxed());
 
         let mut transform_compute = TransformCompute::new(&gpu);
         let mut transform_hierarchy = TransformHierarchy::new();
+        let mut rendering_system = renderer::RenderingSystem::new(gpu.clone());
+
+        while Arc::ptr_eq(
+            &(cube.get(&asset_manager) as Arc<dyn Asset>),
+            asset_manager
+                .placeholder_assets
+                .lock()
+                .get(&TypeId::of::<Obj>())
+                .unwrap(),
+        ) {
+            // wait until the cube is loaded
+            asset_manager.process_deferred_queue();
+            gpu.process_work_queue();
+            previous_frame_end.as_mut().unwrap().cleanup_finished();
+        }
+        rendering_system.register_model(cube.clone(), &asset_manager);
+        let mut renderers = Vec::new();
 
         let dims = (NUM_CUBES as f64).powf(1.0 / 3.0).ceil() as u32;
         for i in 0..NUM_CUBES {
@@ -179,16 +209,19 @@ impl App {
                     .normalize(),
                     rand::random::<f32>() * std::f32::consts::TAU,
                 ),
-                scale: Vec3::splat(rand::random::<f32>() * 2.0 + 0.1),
+                scale: Vec3::splat(0.5),
                 name: format!("cube_{i}"),
                 parent: None,
             };
-            transform_hierarchy.create_transform(t);
+            let transform = transform_hierarchy.create_transform(t);
+            let r = rendering_system.renderer(cube.clone(), &transform, &mut asset_manager);
+            renderers.push(r);
         }
 
         let mut builder = gpu.create_command_buffer(CommandBufferUsage::OneTimeSubmit);
 
-        let (updated, staging_buffer_index) = transform_compute.update_transforms(&gpu, &transform_hierarchy, &mut builder);
+        let (updated, staging_buffer_index) =
+            transform_compute.update_transforms(&gpu, &transform_hierarchy, &mut builder, true);
         let command_buffer = builder.build().unwrap();
 
         // execute buffer copies and global compute shaders
@@ -211,9 +244,11 @@ impl App {
         App {
             asset_manager,
             transform_compute,
+            rendering_system,
+            renderers,
             previous_frame_end,
             gpu,
-            cube: None,
+            cube: Some(cube),
             rcxs: HashMap::new(),
             fps: FPS::new(),
             time: std::time::Instant::now(),
@@ -224,6 +259,9 @@ impl App {
             transforms_updated: false,
             // builder: None,
             frame_time: PerfCounter::new(),
+            update_sim: PerfCounter::new(),
+            paused: false,
+            update_transforms_compute_shader: true,
         }
     }
 }
@@ -384,6 +422,7 @@ impl ApplicationHandler for App {
                         &self.asset_manager,
                         // &self.offsets,
                         self.cube.as_ref().unwrap(),
+                        &mut self.rendering_system,
                         self.transform_compute.model_matrix_buffer.clone(),
                     );
                 }
@@ -464,20 +503,35 @@ impl ApplicationHandler for App {
         if self.cube.is_none() {
             self.cube = Some(self.asset_manager.load_asset::<Obj>("assets/cube/cube.obj"));
         }
-
-        let time_since_epoch = std::time::SystemTime::now()
-            .duration_since(time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64();
-        let angle = (time_since_epoch as f32).sin() * std::f32::consts::TAU;
-        let translation = Vec3::new(angle.cos(), 0.0, angle.sin()) * elapsed * 5.0;
-        (0..NUM_CUBES).into_par_iter().for_each(|i| {
-            let t = self.transform_hierarchy.get_transform(i as u32).unwrap();
-            let t = t.lock();
-            t.translate_by(translation);
-        });
-        // test performance of non-reuse of command buffers
-        // self.transform_compute.command_buffer = None;
+        self.update_sim.start();
+        if !self.paused {
+            let time_since_epoch = std::time::SystemTime::now()
+                .duration_since(time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64();
+            let angle = time_since_epoch % std::f64::consts::TAU;
+            let angle = angle as f32;
+            let translation = Vec3::new(angle.cos(), 0.0, angle.sin()) * elapsed * 5.0;
+            // let rhs = (NUM_CUBES as f32).sqrt().sqrt().sqrt().ceil() as usize;
+            // let chunk_size: usize = NUM_CUBES.div_ceil(rhs);
+            let nt = rayon::current_num_threads();
+            // let chunk_size: usize = util::get_chunk_size(NUM_CUBES);
+            let chunk_size: f32 = NUM_CUBES as f32 / nt as f32;
+            (0..nt).into_par_iter().for_each(|i| {
+                let start = (i as f32 * chunk_size) as usize;
+                let end = ((i + 1) as f32 * chunk_size).min(NUM_CUBES as f32) as usize;
+                for j in start..end {
+                    if let Some(t) = self.transform_hierarchy.get_transform(j as u32) {
+                        let t = t.lock();
+                        t.translate_by(translation);
+                    }
+                }
+            });
+        }
+        self.update_sim.stop();
+        // // test performance of non-reuse of command buffers
+        // self.transform_compute.command_buffer = Vec::new();
+        // self.rendering_system.command_buffer = None;
         // for (_window_id, rcx) in self.rcxs.iter_mut() {
         //     rcx.command_buffer = None;
         // }
@@ -496,6 +550,7 @@ impl ApplicationHandler for App {
             &self.gpu,
             &self.transform_hierarchy,
             &mut builder,
+            self.update_transforms_compute_shader,
         );
         for (_window_id, rcx) in self.rcxs.iter_mut() {
             let cam = self.camera.get_mut(&_window_id).unwrap();
@@ -505,6 +560,14 @@ impl ApplicationHandler for App {
                 rcx.viewport.extent[0] / rcx.viewport.extent[1].abs(),
             );
         }
+        let renderer_updated = self.rendering_system.compute_renderers(
+            &mut builder,
+            &self.transform_compute.model_matrix_buffer,
+            self.asset_manager
+                .rebuild_command_buffer
+                .load(std::sync::atomic::Ordering::SeqCst),
+        );
+
         let command_buffer = builder.build().unwrap();
 
         // execute buffer copies and global compute shaders
@@ -517,8 +580,16 @@ impl ApplicationHandler for App {
                 .then_signal_semaphore()
                 .then_execute(
                     self.gpu.queue.clone(),
-                    self.transform_compute
-                        .command_buffer[staging_buffer_index]
+                    self.transform_compute.command_buffer[staging_buffer_index].clone(),
+                )
+                .unwrap()
+                .then_signal_semaphore()
+                .then_execute(
+                    self.gpu.queue.clone(),
+                    self.rendering_system
+                        .command_buffer
+                        .as_ref()
+                        .unwrap()
                         .clone(),
                 )
                 .unwrap()
@@ -531,6 +602,7 @@ impl ApplicationHandler for App {
             .rebuild_command_buffer
             .load(std::sync::atomic::Ordering::SeqCst)
             || updated
+            || renderer_updated
         {
             for (_window_id, rcx) in self.rcxs.iter_mut() {
                 rcx.command_buffer = None;
@@ -561,6 +633,16 @@ impl ApplicationHandler for App {
                     rcx.window.set_cursor_visible(true);
                 }
             }
+            if rcx.input.get_key_pressed(KeyCode::KeyK) {
+                self.paused = !self.paused;
+            }
+            if rcx.input.get_key_pressed(KeyCode::KeyJ) {
+                self.update_transforms_compute_shader = !self.update_transforms_compute_shader;
+                println!(
+                    "Update transforms compute shader: {}",
+                    self.update_transforms_compute_shader
+                );
+            }
             self.cursor_grabbed = grabbed;
             rcx.gui.immediate_ui(|gui| {
                 let ctx = gui.context();
@@ -589,8 +671,11 @@ impl ApplicationHandler for App {
             LazyLock::new(|| Mutex::new(std::time::Instant::now()));
         {
             let mut last_print = LAST_PRINT.lock();
-            if last_print.elapsed().as_secs_f32() > 5.0 {
-                println!("frame time: {:?}", self.frame_time);
+            if last_print.elapsed().as_secs_f32() > 2.0 {
+                println!(
+                    "frame time: {:?} / update sim: {:?}",
+                    self.frame_time, self.update_sim
+                );
                 println!(
                     "allocate buffers: {:?} / update buffers: {:?} / update parents: {:?} / compute: {:?}",
                     self.transform_compute.perf_counters.allocate_bufs,
@@ -610,6 +695,7 @@ impl ApplicationHandler for App {
                         rcx.build_command_buffer_perf,
                         rcx.execute_command_buffer_perf
                     );
+                    println!("Camera position: {:?}", rcx.camera.lock().pos);
                 }
                 *last_print = std::time::Instant::now();
             }

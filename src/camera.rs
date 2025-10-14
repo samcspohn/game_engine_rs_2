@@ -164,9 +164,9 @@ impl Camera {
     }
     pub fn update(&mut self, input: &Input, dt: f32, grab_cursor: &mut bool) {
         let speed = if input.get_key(KeyCode::ShiftLeft) {
-            5.0
+            20.0
         } else {
-            1.0
+            4.0
         };
         let move_amount = speed * dt;
         let mut movement = Vec3::ZERO;

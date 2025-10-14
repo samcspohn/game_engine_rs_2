@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ops::Sub,
     sync::{
         Arc,
@@ -6,7 +7,7 @@ use std::{
     },
 };
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use vulkano::{
     Version, VulkanLibrary,
     buffer::{
@@ -31,6 +32,8 @@ use vulkano::{
     sync::{GpuFuture, PipelineStage},
 };
 use winit::{event_loop::EventLoop, window::Window};
+
+pub mod gpu_vector;
 
 trait GPUWorkItemBase {
     fn is_completed(&self) -> bool;
@@ -111,9 +114,10 @@ pub struct GPUManager {
     pub mem_alloc: Arc<StandardMemoryAllocator>,
     pub desc_alloc: Arc<StandardDescriptorSetAllocator>,
     // pub pipeline_cache: Arc<PipelineCache>,
-    pub sub_alloc: Arc<SubbufferAllocator>,
-    pub storage_alloc: Arc<SubbufferAllocator>,
-    pub ind_alloc: Arc<SubbufferAllocator>,
+    // pub sub_alloc: Arc<SubbufferAllocator>,
+    // pub storage_alloc: Arc<SubbufferAllocator>,
+    // pub ind_alloc: Arc<SubbufferAllocator>,
+    pub _sub_alloc: RwLock<HashMap<BufferUsage, Arc<SubbufferAllocator>>>,
     pub work_queue: GPUWorkQueue,
     pub surface_format: Format,
     pub image_count: u32,
@@ -296,9 +300,10 @@ impl GPUManager {
             mem_alloc,
             desc_alloc,
             // pipeline_cache,
-            sub_alloc: Arc::new(sub_alloc),
-            storage_alloc: Arc::new(storage_alloc),
-            ind_alloc: Arc::new(ind_alloc),
+            // sub_alloc: Arc::new(sub_alloc),
+            // storage_alloc: Arc::new(storage_alloc),
+            // ind_alloc: Arc::new(ind_alloc),
+            _sub_alloc: RwLock::new(HashMap::new()),
             work_queue: GPUWorkQueue::new(),
             surface_format,
             image_count: surface_capabilities.min_image_count.max(2),
@@ -312,6 +317,30 @@ impl GPUManager {
             .unwrap(),
         })
     }
+
+    pub fn sub_alloc(&self, usage: BufferUsage) -> Arc<SubbufferAllocator> {
+        if let Some(alloc) = self
+            ._sub_alloc
+            .read()
+            .get(&(usage))
+        {
+            return alloc.clone();
+        }
+        let alloc = Arc::new(SubbufferAllocator::new(
+            self.mem_alloc.clone(),
+            SubbufferAllocatorCreateInfo {
+                buffer_usage: usage | BufferUsage::TRANSFER_SRC,
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+        ));
+        self._sub_alloc
+            .write()
+            .insert(usage, alloc.clone());
+        alloc
+    }
+
     pub fn begin_query(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,

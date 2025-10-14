@@ -144,7 +144,7 @@ impl Camera {
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         aspect: f32,
     ) {
-        let cam_data_buf = gpu.sub_alloc.allocate_sized().unwrap();
+        let cam_data_buf = gpu.sub_alloc(BufferUsage::UNIFORM_BUFFER).allocate_sized().unwrap();
         {
             let mut cam_data = cam_data_buf.write().unwrap();
             *cam_data = crate::vs::camera {

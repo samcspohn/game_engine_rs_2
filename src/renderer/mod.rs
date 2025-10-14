@@ -1,5 +1,7 @@
 use std::{
-    collections::HashMap, ops::Sub, sync::{Arc, atomic::AtomicU32}
+    collections::HashMap,
+    ops::Sub,
+    sync::{Arc, atomic::AtomicU32},
 };
 
 use egui::layers;
@@ -20,7 +22,7 @@ use vulkano::{
 
 use crate::{
     asset_manager::{Asset, AssetHandle, AssetManager},
-    gpu_manager::GPUManager,
+    gpu_manager::{GPUManager, gpu_vector::GPUVector},
     obj_loader::Obj,
     renderer,
     transform::Transform,
@@ -34,7 +36,7 @@ mod cs {
     }
 }
 
-#[derive(BufferContents)]
+#[derive(BufferContents, Copy, Clone, Default)]
 #[repr(C)]
 struct Renderer {
     m_id: u32,
@@ -47,11 +49,11 @@ pub struct RenderingSystem {
     pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
     // buffers
     indirect_commands_buffer: Subbuffer<[DrawIndexedIndirectCommand]>,
-    renderer_buffer: Subbuffer<[Renderer]>,
-    renderer_inits_buffer: Subbuffer<[cs::RendererInit]>,
-    renderer_uninits_buffer: Subbuffer<[u32]>,
+    renderer_buffer: GPUVector<Renderer>,
+    renderer_inits_buffer: GPUVector<cs::RendererInit>,
+    renderer_uninits_buffer: GPUVector<u32>,
     model_indirect_buffer: Subbuffer<[cs::ModelIndirect]>, // [indirect_offset, count]
-    mvp_buffer: Subbuffer<[[[f32; 4]; 4]]>,
+    mvp_buffer: GPUVector<[[f32; 4]; 4]>,
     workgroup_sums_buffer: Subbuffer<[u32]>,
     stages: Subbuffer<[cs::Stage]>,
     dispatch: Subbuffer<[DispatchIndirectCommand]>,
@@ -60,10 +62,10 @@ pub struct RenderingSystem {
     model_indirect_buffer_len: usize,
     model_map: HashMap<u32, u32>, // maps
     renderer_storage: Storage<Renderer>,
-    renderer_inits: Vec<cs::RendererInit>,
+    // renderer_inits: Vec<cs::RendererInit>,
     model_indirects: Vec<cs::ModelIndirect>,
     indirect_commands: Vec<DrawIndexedIndirectCommand>,
-    renderer_uninits: Vec<u32>,
+    // renderer_uninits: Vec<u32>,
     num_mvp: AtomicU32,
 }
 
@@ -76,7 +78,7 @@ impl RendererComponent {
     pub fn uninit(self, r: &mut RenderingSystem) -> u32 {
         let id = self.model.asset_id;
         r.renderer_storage.remove(self.r_idx);
-        r.renderer_uninits.push(self.r_idx);
+        r.renderer_uninits_buffer.push_data(self.r_idx);
         // if let Some(count) = r.model_map.get_mut(&id) {
         //     *count -= 1;
         // }
@@ -107,33 +109,30 @@ impl RenderingSystem {
             indirect_commands_buffer: gpu.buffer_array(
                 1,
                 MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::INDIRECT_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::STORAGE_BUFFER,
+                BufferUsage::INDIRECT_BUFFER
+                    | BufferUsage::TRANSFER_DST
+                    | BufferUsage::STORAGE_BUFFER,
             ),
-            renderer_buffer: gpu.buffer_array(
-                1,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-            ),
+            renderer_buffer: GPUVector::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
             model_indirect_buffer: gpu.buffer_array(
                 1,
                 MemoryTypeFilter::PREFER_DEVICE,
                 BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
             ),
-            mvp_buffer: gpu.buffer_array(
-                1,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::VERTEX_BUFFER,
+            // mvp_buffer: gpu.buffer_array(
+            //     1,
+            //     MemoryTypeFilter::PREFER_DEVICE,
+            //     BufferUsage::STORAGE_BUFFER
+            //         | BufferUsage::TRANSFER_DST
+            //         | BufferUsage::VERTEX_BUFFER,
+            // ),
+            mvp_buffer: GPUVector::new(
+                &gpu,
+                BufferUsage::STORAGE_BUFFER | BufferUsage::VERTEX_BUFFER,
+                false,
             ),
-            renderer_inits_buffer: gpu.buffer_array(
-                1,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
-            ),
-            renderer_uninits_buffer: gpu.buffer_array(
-                1,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
-            ),
+            renderer_inits_buffer: GPUVector::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
+            renderer_uninits_buffer: GPUVector::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
             workgroup_sums_buffer: gpu.buffer_array(
                 1,
                 MemoryTypeFilter::PREFER_DEVICE,
@@ -154,18 +153,14 @@ impl RenderingSystem {
             model_indirect_buffer_len: 0,
             model_map: HashMap::new(),
             renderer_storage: Storage::new(),
-            renderer_inits: Vec::new(),
-            renderer_uninits: Vec::new(),
+            // renderer_inits: Vec::new(),
+            // renderer_uninits: Vec::new(),
             num_mvp: AtomicU32::new(0),
             model_indirects: Vec::new(),
             indirect_commands: Vec::new(),
         }
     }
-    pub fn register_model(
-        &mut self,
-        model: AssetHandle<Obj>,
-        assets: &AssetManager,
-    ) {
+    pub fn register_model(&mut self, model: AssetHandle<Obj>, assets: &AssetManager) {
         let m_id = model.asset_id;
         // let m_idx = model.get(assets).id;
         // let t_idx = transform.get_idx();
@@ -193,16 +188,12 @@ impl RenderingSystem {
         transform: &Transform,
         assets: &AssetManager,
     ) -> RendererComponent {
-        // self.model_map
-        //     .entry(model.asset_id)
-        //     .and_modify(|e| *e += 1)
-        //     .or_insert(1);
         let asset_id = model.asset_id;
         let m_id = *self.model_map.get(&asset_id).expect("Model not registered");
         let t_idx = transform.get_idx();
         let renderer = Renderer { m_id, t_idx };
         let r_idx = self.renderer_storage.insert(renderer);
-        self.renderer_inits.push(cs::RendererInit {
+        self.renderer_inits_buffer.push_data(cs::RendererInit {
             idx: r_idx,
             r: cs::Renderer { t_idx, m_id },
         });
@@ -212,8 +203,7 @@ impl RenderingSystem {
         &mut self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         model_matrices: &Subbuffer<[[[f32; 4]; 4]]>,
-        assets_loaded: bool
-        // cam: &Subbuffer<crate::vs::camera>,
+        assets_loaded: bool, // cam: &Subbuffer<crate::vs::camera>,
     ) -> bool {
         let mut ret = false;
 
@@ -230,7 +220,7 @@ impl RenderingSystem {
             }
             let model_indirect_buf = self
                 .gpu
-                .storage_alloc
+                .sub_alloc(BufferUsage::STORAGE_BUFFER)
                 .allocate_slice(self.model_indirects.len().max(1) as u64)
                 .unwrap();
             if self.model_indirects.len() > 0 {
@@ -255,54 +245,74 @@ impl RenderingSystem {
             );
             ret = true;
         }
-        
+
+        ret |= self
+            .renderer_buffer
+            .resize_buffer(self.renderer_storage.len(), &self.gpu, builder);
+        ret |= self
+            .mvp_buffer
+            .resize_buffer(self.renderer_storage.len(), &self.gpu, builder);
+
         // resize renderer buffer. new renderers are added as deltas
-        if self.renderer_buffer.len() < self.renderer_storage.len() as u64 {
-            let new_size = self.renderer_storage.len().next_power_of_two() as u64;
-            let buf = self.gpu.buffer_array(
-                new_size,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-            );
-            builder
-                .copy_buffer(CopyBufferInfo::buffers(
-                    self.renderer_buffer.clone(),
-                    buf.clone(),
-                ))
-                .unwrap();
-            self.renderer_buffer = buf;
+        // if self.mvp_buffer.len() < self.renderer_storage.len() as u64 {
+        //     // let new_size = self.renderer_storage.len().next_power_of_two() as u64;
+        //     // let buf = self.gpu.buffer_array(
+        //     //     new_size,
+        //     //     MemoryTypeFilter::PREFER_DEVICE,
+        //     //     BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+        //     // );
+        //     // builder
+        //     //     .copy_buffer(CopyBufferInfo::buffers(
+        //     //         self.renderer_buffer.clone(),
+        //     //         buf.clone(),
+        //     //     ))
+        //     //     .unwrap();
+        //     // self.renderer_buffer = buf;
 
-            self.mvp_buffer = self.gpu.buffer_array(
-                new_size,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::VERTEX_BUFFER,
-            );
+        //     self.mvp_buffer = self.gpu.buffer_array(
+        //         new_size,
+        //         MemoryTypeFilter::PREFER_DEVICE,
+        //         BufferUsage::STORAGE_BUFFER
+        //             | BufferUsage::TRANSFER_DST
+        //             | BufferUsage::VERTEX_BUFFER,
+        //     );
 
-            ret = true;
-        }
+        //     ret = true;
+        // }
         // resize inits buffer
-        if self.renderer_inits_buffer.len() < self.renderer_inits.len() as u64 {
-            let new_size = self.renderer_inits.len().next_power_of_two() as u64;
-            self.renderer_inits_buffer = self.gpu.buffer_array(
-                new_size,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
-            );
-            ret = true;
-        }
-        // resize uninits buffer
-        if self.renderer_uninits_buffer.len() < self.renderer_uninits.len() as u64 {
-            let new_size = self.renderer_uninits.len().next_power_of_two() as u64;
-            self.renderer_uninits_buffer = self.gpu.buffer_array(
-                new_size,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
-            );
-            ret = true;
-        }
+        // if self.renderer_inits_buffer.len() < self.renderer_inits.len() as u64 {
+        //     let new_size = self.renderer_inits.len().next_power_of_two() as u64;
+        //     self.renderer_inits_buffer = self.gpu.buffer_array(
+        //         new_size,
+        //         MemoryTypeFilter::PREFER_DEVICE,
+        //         BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
+        //     );
+        //     ret = true;
+        // }
+        // // resize uninits buffer
+        // if self.renderer_uninits_buffer.len() < self.renderer_uninits.len() as u64 {
+        //     let new_size = self.renderer_uninits.len().next_power_of_two() as u64;
+        //     self.renderer_uninits_buffer = self.gpu.buffer_array(
+        //         new_size,
+        //         MemoryTypeFilter::PREFER_DEVICE,
+        //         BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
+        //     );
+        //     ret = true;
+        // }
+        let renderer_inits_len = self.renderer_inits_buffer.data_len();
+        let renderer_uninits_len = self.renderer_uninits_buffer.data_len();
+        self.renderer_inits_buffer.upload_delta(&self.gpu, builder);
+        self.renderer_uninits_buffer.upload_delta(&self.gpu, builder);
+        self.renderer_inits_buffer.clear();
+        self.renderer_uninits_buffer.clear();
+
         if self.indirect_draw_commands_len < self.indirect_commands.len() {
             let delta = self.indirect_commands.len() - self.indirect_draw_commands_len;
-            let buf = self.gpu.storage_alloc.allocate_slice(delta as u64).unwrap();
+            let buf = self
+                .gpu
+                .sub_alloc(BufferUsage::STORAGE_BUFFER)
+                .allocate_slice(delta as u64)
+                .unwrap();
             {
                 let mut write_lock = buf.write().unwrap();
                 write_lock
@@ -313,7 +323,9 @@ impl RenderingSystem {
                 let new_buf = self.gpu.buffer_array(
                     new_size,
                     MemoryTypeFilter::PREFER_DEVICE,
-                    BufferUsage::INDIRECT_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::STORAGE_BUFFER,
+                    BufferUsage::INDIRECT_BUFFER
+                        | BufferUsage::TRANSFER_DST
+                        | BufferUsage::STORAGE_BUFFER,
                 );
                 builder
                     .copy_buffer(CopyBufferInfo::buffers(
@@ -346,10 +358,10 @@ impl RenderingSystem {
                 layout_0.clone(),
                 [
                     WriteDescriptorSet::buffer(0, model_matrices.clone()),
-                    WriteDescriptorSet::buffer(1, self.mvp_buffer.clone()),
-                    WriteDescriptorSet::buffer(2, self.renderer_buffer.clone()),
-                    WriteDescriptorSet::buffer(3, self.renderer_inits_buffer.clone()),
-                    WriteDescriptorSet::buffer(4, self.renderer_uninits_buffer.clone()),
+                    WriteDescriptorSet::buffer(1, self.mvp_buffer.buf().clone()),
+                    WriteDescriptorSet::buffer(2, self.renderer_buffer.buf().clone()),
+                    WriteDescriptorSet::buffer(3, self.renderer_inits_buffer.buf().clone()),
+                    WriteDescriptorSet::buffer(4, self.renderer_uninits_buffer.buf().clone()),
                     WriteDescriptorSet::buffer(5, self.model_indirect_buffer.clone()),
                     WriteDescriptorSet::buffer(6, self.workgroup_sums_buffer.clone()),
                     WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.clone()),
@@ -405,50 +417,59 @@ impl RenderingSystem {
         }
 
         // allocate temp buffers and copy data
-        let renderer_inits_buf = self
+        // let renderer_inits_buf = self
+        //     .gpu
+        //     .sub_alloc(BufferUsage::STORAGE_BUFFER)
+        //     .allocate_slice(self.renderer_inits.len().max(1) as u64)
+        //     .unwrap();
+        // if self.renderer_inits.len() > 0 {
+        //     let mut write_lock = renderer_inits_buf.write().unwrap();
+        //     write_lock.copy_from_slice(&self.renderer_inits);
+        // }
+        // let renderer_uninits_buf = self
+        //     .gpu
+        //     .sub_alloc(BufferUsage::STORAGE_BUFFER)
+        //     .allocate_slice(self.renderer_uninits.len().max(1) as u64)
+        //     .unwrap();
+        // if self.renderer_uninits.len() > 0 {
+        //     let mut write_lock = renderer_uninits_buf.write().unwrap();
+        //     write_lock.copy_from_slice(&self.renderer_uninits);
+        // }
+
+        let dispatch_buf = self
             .gpu
-            .storage_alloc
-            .allocate_slice(self.renderer_inits.len().max(1) as u64)
+            .sub_alloc(BufferUsage::INDIRECT_BUFFER)
+            .allocate_slice(8)
             .unwrap();
-        if self.renderer_inits.len() > 0 {
-            let mut write_lock = renderer_inits_buf.write().unwrap();
-            write_lock.copy_from_slice(&self.renderer_inits);
-        }
-        let renderer_uninits_buf = self
+        let stage_buf = self
             .gpu
-            .storage_alloc
-            .allocate_slice(self.renderer_uninits.len().max(1) as u64)
+            .sub_alloc(BufferUsage::UNIFORM_BUFFER)
+            .allocate_slice(8)
             .unwrap();
-        if self.renderer_uninits.len() > 0 {
-            let mut write_lock = renderer_uninits_buf.write().unwrap();
-            write_lock.copy_from_slice(&self.renderer_uninits);
-        }
-        let dispatch_buf = self.gpu.ind_alloc.allocate_slice(8).unwrap();
-        let stage_buf = self.gpu.sub_alloc.allocate_slice(8).unwrap();
         {
             let mut write_lock = dispatch_buf.write().unwrap();
             let mut stage_lock = stage_buf.write().unwrap();
 
             // stage 0, 0 init renderers
             write_lock[0] = DispatchIndirectCommand {
-                x: self.renderer_inits.len().div_ceil(64) as u32,
+                x: renderer_inits_len.div_ceil(64) as u32,
                 y: 1,
                 z: 1,
             };
             stage_lock[0] = cs::Stage {
-                num_jobs: self.renderer_inits.len() as u32,
+                num_jobs: renderer_inits_len as u32,
                 stage: 0,
                 pass: 0,
             };
 
             // stage 0, 1 uninit renderers
             write_lock[1] = DispatchIndirectCommand {
-                x: self.renderer_uninits.len().div_ceil(64) as u32,
+                x: renderer_uninits_len.div_ceil(64) as u32,
                 y: 1,
                 z: 1,
             };
             stage_lock[1] = cs::Stage {
-                num_jobs: self.renderer_uninits.len() as u32,
+                num_jobs: renderer_uninits_len as u32,
                 stage: 0,
                 pass: 1,
             };
@@ -518,20 +539,22 @@ impl RenderingSystem {
                 pass: 0,
             };
         }
-        self.renderer_inits.clear();
-        self.renderer_uninits.clear();
 
+        // self.renderer_inits.clear();
+        // self.renderer_uninits.clear();
+
+        // builder
+        //     .copy_buffer(CopyBufferInfo::buffers(
+        //         renderer_inits_buf,
+        //         self.renderer_inits_buffer.buf().clone(),
+        //     ))
+        //     .unwrap()
+        //     .copy_buffer(CopyBufferInfo::buffers(
+        //         renderer_uninits_buf,
+        //         self.renderer_uninits_buffer.buf().clone(),
+        //     ))
+        //     .unwrap()
         builder
-            .copy_buffer(CopyBufferInfo::buffers(
-                renderer_inits_buf,
-                self.renderer_inits_buffer.clone(),
-            ))
-            .unwrap()
-            .copy_buffer(CopyBufferInfo::buffers(
-                renderer_uninits_buf,
-                self.renderer_uninits_buffer.clone(),
-            ))
-            .unwrap()
             .copy_buffer(CopyBufferInfo::buffers(dispatch_buf, self.dispatch.clone()))
             .unwrap()
             .copy_buffer(CopyBufferInfo::buffers(stage_buf, self.stages.clone()))
@@ -544,9 +567,8 @@ impl RenderingSystem {
         &mut self,
         cam: Subbuffer<crate::vs::camera>,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-        model_matrices: Subbuffer<[[[f32; 4]; 4]]>
+        model_matrices: Subbuffer<[[[f32; 4]; 4]]>,
     ) {
-
         // builder
         //     .copy_buffer(CopyBufferInfo::buffers(
         //         cam,
@@ -554,15 +576,17 @@ impl RenderingSystem {
         //     ))
         //     .unwrap();
 
-        builder.bind_pipeline_compute(self.pipeline.clone()).unwrap();
+        builder
+            .bind_pipeline_compute(self.pipeline.clone())
+            .unwrap();
         let layout_0 = self.pipeline.layout().set_layouts().get(0).unwrap();
         let set_0 = DescriptorSet::new(
             self.gpu.desc_alloc.clone(),
             layout_0.clone(),
             [
                 WriteDescriptorSet::buffer(0, model_matrices),
-                WriteDescriptorSet::buffer(1, self.mvp_buffer.clone()),
-                WriteDescriptorSet::buffer(2, self.renderer_buffer.clone()),
+                WriteDescriptorSet::buffer(1, self.mvp_buffer.buf().clone()),
+                WriteDescriptorSet::buffer(2, self.renderer_buffer.buf().clone()),
                 WriteDescriptorSet::buffer(3, self.gpu.empty.clone()),
                 WriteDescriptorSet::buffer(4, self.gpu.empty.clone()),
                 WriteDescriptorSet::buffer(5, self.model_indirect_buffer.clone()),
@@ -584,7 +608,10 @@ impl RenderingSystem {
         let set2 = DescriptorSet::new(
             self.gpu.desc_alloc.clone(),
             layout2.clone(),
-            [WriteDescriptorSet::buffer(0, self.stages.clone().slice(7..=7))],
+            [WriteDescriptorSet::buffer(
+                0,
+                self.stages.clone().slice(7..=7),
+            )],
             [],
         )
         .unwrap();
@@ -598,7 +625,9 @@ impl RenderingSystem {
             )
             .unwrap();
         unsafe {
-            builder.dispatch_indirect(self.dispatch.clone().slice(7..=7)).unwrap();
+            builder
+                .dispatch_indirect(self.dispatch.clone().slice(7..=7))
+                .unwrap();
         }
     }
 
@@ -647,7 +676,7 @@ impl RenderingSystem {
                             mesh.vertex_buffer.clone(),
                             mesh.tex_coord_buffer.clone(),
                             mesh.normal_buffer.clone(),
-                            self.mvp_buffer.clone(),
+                            self.mvp_buffer.buf().clone(),
                         ),
                     )
                     .unwrap()

@@ -112,7 +112,7 @@ struct TransformUpdateBuffers {
 impl TransformUpdateBuffers {
     fn new(gpu: &GPUManager) -> Self {
         let mem_filter: MemoryTypeFilter =
-            MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE;
+            MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_RANDOM_ACCESS;
         let usage: BufferUsage = BufferUsage::STORAGE_BUFFER;
         let position: Subbuffer<[f32]> = gpu.buffer_array(3, mem_filter, usage);
         let rotation: Subbuffer<[f32]> = gpu.buffer_array(4, mem_filter, usage);
@@ -132,7 +132,7 @@ impl TransformUpdateBuffers {
 
     fn resize(&mut self, gpu: &GPUManager, new_size: u64) {
         let mem_filter: MemoryTypeFilter =
-            MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE;
+            MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_RANDOM_ACCESS;
         let usage: BufferUsage = BufferUsage::STORAGE_BUFFER;
 
         if self.position.len() < new_size {
@@ -316,11 +316,22 @@ impl TransformCompute {
         let sbi = self.staging_buffer_index;
 
         self.perf_counters.allocate_bufs.start();
-        let pc1: Subbuffer<cs::PushConstants> = gpu.sub_alloc.allocate_sized().unwrap();
-        let pc2: Subbuffer<cs::PushConstants> = gpu.sub_alloc.allocate_sized().unwrap();
-        let pc3: Subbuffer<cs::PushConstants> = gpu.sub_alloc.allocate_sized().unwrap();
-        let indirect: Subbuffer<[DispatchIndirectCommand]> =
-            gpu.ind_alloc.allocate_slice(3).unwrap();
+        let pc1: Subbuffer<cs::PushConstants> = gpu
+            .sub_alloc(BufferUsage::UNIFORM_BUFFER)
+            .allocate_sized()
+            .unwrap();
+        let pc2: Subbuffer<cs::PushConstants> = gpu
+            .sub_alloc(BufferUsage::UNIFORM_BUFFER)
+            .allocate_sized()
+            .unwrap();
+        let pc3: Subbuffer<cs::PushConstants> = gpu
+            .sub_alloc(BufferUsage::UNIFORM_BUFFER)
+            .allocate_sized()
+            .unwrap();
+        let indirect: Subbuffer<[DispatchIndirectCommand]> = gpu
+            .sub_alloc(BufferUsage::INDIRECT_BUFFER)
+            .allocate_slice(3)
+            .unwrap();
 
         self.perf_counters.allocate_bufs.stop();
         // 4 flags per tranform, 1 bit each for pos, rot, scale, parent
@@ -450,7 +461,7 @@ impl TransformCompute {
                 .collect::<Vec<_>>();
             let parent_updates_len = parent_updates.len();
             let parent_indices = gpu
-                .storage_alloc
+                .sub_alloc(BufferUsage::STORAGE_BUFFER)
                 .allocate_slice((parent_updates_len * 2).max(1) as u64)
                 .unwrap();
             {

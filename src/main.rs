@@ -71,7 +71,7 @@ fn main() -> Result<(), impl Error> {
 }
 
 const MAX_FPS_SAMPLE_AGE: f32 = 1.0;
-const NUM_CUBES: usize = 1 << 23; // 1<<22 = 4,194,304
+const NUM_CUBES: usize = 1 << 20; // 1<<22 = 4,194,304
 struct FPS {
     frame_times: std::collections::VecDeque<f32>,
     frame_ages: std::collections::VecDeque<time::Instant>,
@@ -127,6 +127,7 @@ struct App {
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     frame_time: PerfCounter,
     update_sim: PerfCounter,
+    update_render: PerfCounter,
     paused: bool,
     update_transforms_compute_shader: bool,
 }
@@ -260,6 +261,7 @@ impl App {
             // builder: None,
             frame_time: PerfCounter::new(),
             update_sim: PerfCounter::new(),
+            update_render: PerfCounter::new(),
             paused: false,
             update_transforms_compute_shader: true,
         }
@@ -560,6 +562,7 @@ impl ApplicationHandler for App {
                 rcx.viewport.extent[0] / rcx.viewport.extent[1].abs(),
             );
         }
+        self.update_render.start();
         let renderer_updated = self.rendering_system.compute_renderers(
             &mut builder,
             &self.transform_compute.model_matrix_buffer,
@@ -567,6 +570,7 @@ impl ApplicationHandler for App {
                 .rebuild_command_buffer
                 .load(std::sync::atomic::Ordering::SeqCst),
         );
+        self.update_render.stop();
 
         let command_buffer = builder.build().unwrap();
 
@@ -673,8 +677,8 @@ impl ApplicationHandler for App {
             let mut last_print = LAST_PRINT.lock();
             if last_print.elapsed().as_secs_f32() > 2.0 {
                 println!(
-                    "frame time: {:?} / update sim: {:?}",
-                    self.frame_time, self.update_sim
+                    "frame time: {:?} / update sim: {:?} / update render: {:?}",
+                    self.frame_time, self.update_sim, self.update_render
                 );
                 println!(
                     "allocate buffers: {:?} / update buffers: {:?} / update parents: {:?} / compute: {:?}",

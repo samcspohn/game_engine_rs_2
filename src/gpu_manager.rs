@@ -33,7 +33,7 @@ use vulkano::{
 };
 use winit::{event_loop::EventLoop, window::Window};
 
-pub mod gpu_vector;
+pub mod gpu_vec;
 
 trait GPUWorkItemBase {
     fn is_completed(&self) -> bool;

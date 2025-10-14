@@ -24,6 +24,7 @@ use render_context::RenderContext;
 use std::{
     any::TypeId,
     collections::HashMap,
+    env,
     error::Error,
     ops::Div,
     sync::{Arc, LazyLock},
@@ -134,6 +135,9 @@ struct App {
 
 impl App {
     fn new(event_loop: &EventLoop<()>) -> Self {
+        unsafe {
+            env::set_var("RUST_BACKTRACE", "1");
+        }
         let gpu = gpu_manager::GPUManager::new(event_loop);
 
         // let vertices = [

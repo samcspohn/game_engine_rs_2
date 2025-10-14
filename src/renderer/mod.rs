@@ -22,7 +22,7 @@ use vulkano::{
 
 use crate::{
     asset_manager::{Asset, AssetHandle, AssetManager},
-    gpu_manager::{GPUManager, gpu_vector::GPUVector},
+    gpu_manager::{GPUManager, gpu_vec::GPUVec},
     obj_loader::Obj,
     renderer,
     transform::Transform,
@@ -48,25 +48,20 @@ pub struct RenderingSystem {
     pipeline: Arc<ComputePipeline>,
     pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
     // buffers
-    indirect_commands_buffer: Subbuffer<[DrawIndexedIndirectCommand]>,
-    renderer_buffer: GPUVector<Renderer>,
-    renderer_inits_buffer: GPUVector<cs::RendererInit>,
-    renderer_uninits_buffer: GPUVector<u32>,
-    model_indirect_buffer: Subbuffer<[cs::ModelIndirect]>, // [indirect_offset, count]
-    mvp_buffer: GPUVector<[[f32; 4]; 4]>,
-    workgroup_sums_buffer: Subbuffer<[u32]>,
+    indirect_commands_buffer: GPUVec<DrawIndexedIndirectCommand>,
+    renderer_buffer: GPUVec<Renderer>,
+    renderer_inits_buffer: GPUVec<cs::RendererInit>,
+    renderer_uninits_buffer: GPUVec<u32>,
+    model_indirect_buffer: GPUVec<cs::ModelIndirect>, // [indirect_offset, count]
+    mvp_buffer: GPUVec<[[f32; 4]; 4]>,
+    workgroup_sums_buffer: GPUVec<u32>,
     stages: Subbuffer<[cs::Stage]>,
     dispatch: Subbuffer<[DispatchIndirectCommand]>,
     // data
-    indirect_draw_commands_len: usize,
-    model_indirect_buffer_len: usize,
+    // model_indirect_buffer_len: usize,
     model_map: HashMap<u32, u32>, // maps
     renderer_storage: Storage<Renderer>,
-    // renderer_inits: Vec<cs::RendererInit>,
-    model_indirects: Vec<cs::ModelIndirect>,
-    indirect_commands: Vec<DrawIndexedIndirectCommand>,
-    // renderer_uninits: Vec<u32>,
-    num_mvp: AtomicU32,
+    // model_indirects: Vec<cs::ModelIndirect>,
 }
 
 pub struct RendererComponent {
@@ -79,9 +74,6 @@ impl RendererComponent {
         let id = self.model.asset_id;
         r.renderer_storage.remove(self.r_idx);
         r.renderer_uninits_buffer.push_data(self.r_idx);
-        // if let Some(count) = r.model_map.get_mut(&id) {
-        //     *count -= 1;
-        // }
         id
     }
 }
@@ -106,38 +98,21 @@ impl RenderingSystem {
         Self {
             command_buffer: None,
             pipeline,
-            indirect_commands_buffer: gpu.buffer_array(
-                1,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::INDIRECT_BUFFER
-                    | BufferUsage::TRANSFER_DST
-                    | BufferUsage::STORAGE_BUFFER,
+            indirect_commands_buffer: GPUVec::new(
+                &gpu,
+                BufferUsage::INDIRECT_BUFFER | BufferUsage::STORAGE_BUFFER,
+                true,
             ),
-            renderer_buffer: GPUVector::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
-            model_indirect_buffer: gpu.buffer_array(
-                1,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
-            ),
-            // mvp_buffer: gpu.buffer_array(
-            //     1,
-            //     MemoryTypeFilter::PREFER_DEVICE,
-            //     BufferUsage::STORAGE_BUFFER
-            //         | BufferUsage::TRANSFER_DST
-            //         | BufferUsage::VERTEX_BUFFER,
-            // ),
-            mvp_buffer: GPUVector::new(
+            renderer_buffer: GPUVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
+            model_indirect_buffer: GPUVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
+            mvp_buffer: GPUVec::new(
                 &gpu,
                 BufferUsage::STORAGE_BUFFER | BufferUsage::VERTEX_BUFFER,
                 false,
             ),
-            renderer_inits_buffer: GPUVector::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
-            renderer_uninits_buffer: GPUVector::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
-            workgroup_sums_buffer: gpu.buffer_array(
-                1,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER,
-            ),
+            renderer_inits_buffer: GPUVec::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
+            renderer_uninits_buffer: GPUVec::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
+            workgroup_sums_buffer: GPUVec::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
             stages: gpu.buffer_array(
                 8,
                 MemoryTypeFilter::PREFER_DEVICE,
@@ -149,37 +124,34 @@ impl RenderingSystem {
                 BufferUsage::INDIRECT_BUFFER | BufferUsage::TRANSFER_DST,
             ),
             gpu,
-            indirect_draw_commands_len: 0,
-            model_indirect_buffer_len: 0,
+            // model_indirect_buffer_len: 0,
             model_map: HashMap::new(),
             renderer_storage: Storage::new(),
-            // renderer_inits: Vec::new(),
-            // renderer_uninits: Vec::new(),
-            num_mvp: AtomicU32::new(0),
-            model_indirects: Vec::new(),
-            indirect_commands: Vec::new(),
+            // model_indirects: Vec::new(),
+            // indirect_commands: Vec::new(),
         }
     }
     pub fn register_model(&mut self, model: AssetHandle<Obj>, assets: &AssetManager) {
         let m_id = model.asset_id;
         // let m_idx = model.get(assets).id;
         // let t_idx = transform.get_idx();
-        let indirect_offset = self.indirect_commands.len() as u32;
+        let indirect_offset = self.indirect_commands_buffer.data_len() as u32;
         let count = model.get(assets).meshes.len() as u32;
-        let a = self.model_indirects.len();
+        let a = self.model_indirect_buffer.data_len();
         self.model_map.insert(m_id, a as u32);
-        self.model_indirects.push(cs::ModelIndirect {
+        self.model_indirect_buffer.push_data(cs::ModelIndirect {
             offset: indirect_offset,
             count,
         });
         for mesh in &model.get(assets).meshes {
-            self.indirect_commands.push(DrawIndexedIndirectCommand {
-                index_count: mesh.indices.len() as u32,
-                instance_count: 0,
-                first_index: 0,
-                vertex_offset: 0,
-                first_instance: 0,
-            });
+            self.indirect_commands_buffer
+                .push_data(DrawIndexedIndirectCommand {
+                    index_count: mesh.indices.len() as u32,
+                    instance_count: 0,
+                    first_index: 0,
+                    vertex_offset: 0,
+                    first_instance: 0,
+                });
         }
     }
     pub fn renderer(
@@ -206,44 +178,12 @@ impl RenderingSystem {
         assets_loaded: bool, // cam: &Subbuffer<crate::vs::camera>,
     ) -> bool {
         let mut ret = false;
-
-        if assets_loaded || self.model_indirect_buffer_len < self.model_indirects.len() {
-            // rebuild model indirect buffer
-            if self.model_indirect_buffer_len < self.model_indirects.len() {
-                let new_size = self.model_indirects.len().next_power_of_two() as u64;
-                self.model_indirect_buffer = self.gpu.buffer_array(
-                    new_size,
-                    MemoryTypeFilter::PREFER_DEVICE,
-                    BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
-                );
-                ret = true;
-            }
-            let model_indirect_buf = self
-                .gpu
-                .sub_alloc(BufferUsage::STORAGE_BUFFER)
-                .allocate_slice(self.model_indirects.len().max(1) as u64)
-                .unwrap();
-            if self.model_indirects.len() > 0 {
-                let mut write_lock = model_indirect_buf.write().unwrap();
-                write_lock.copy_from_slice(&self.model_indirects);
-            }
-            builder
-                .copy_buffer(CopyBufferInfo::buffers(
-                    model_indirect_buf,
-                    self.model_indirect_buffer.clone(),
-                ))
-                .unwrap();
-            self.model_indirect_buffer_len = self.model_indirects.len();
-        }
-
-        let num_workgroups = self.indirect_commands.len().div_ceil(64).max(1) as u32;
-        if self.workgroup_sums_buffer.len() < num_workgroups as u64 {
-            self.workgroup_sums_buffer = self.gpu.buffer_array(
-                num_workgroups as u64,
-                MemoryTypeFilter::PREFER_DEVICE,
-                BufferUsage::STORAGE_BUFFER,
-            );
-            ret = true;
+        let num_workgroups = self.indirect_commands_buffer.data_len().div_ceil(64).max(1) as u32;
+        ret |= self.workgroup_sums_buffer
+            .resize_buffer(num_workgroups as usize, &self.gpu, builder);
+        ret |= self.model_indirect_buffer.upload_delta(&self.gpu, builder);
+        if assets_loaded {
+            ret |= self.model_indirect_buffer.force_update(&self.gpu, builder);
         }
 
         ret |= self
@@ -253,99 +193,16 @@ impl RenderingSystem {
             .mvp_buffer
             .resize_buffer(self.renderer_storage.len(), &self.gpu, builder);
 
-        // resize renderer buffer. new renderers are added as deltas
-        // if self.mvp_buffer.len() < self.renderer_storage.len() as u64 {
-        //     // let new_size = self.renderer_storage.len().next_power_of_two() as u64;
-        //     // let buf = self.gpu.buffer_array(
-        //     //     new_size,
-        //     //     MemoryTypeFilter::PREFER_DEVICE,
-        //     //     BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
-        //     // );
-        //     // builder
-        //     //     .copy_buffer(CopyBufferInfo::buffers(
-        //     //         self.renderer_buffer.clone(),
-        //     //         buf.clone(),
-        //     //     ))
-        //     //     .unwrap();
-        //     // self.renderer_buffer = buf;
-
-        //     self.mvp_buffer = self.gpu.buffer_array(
-        //         new_size,
-        //         MemoryTypeFilter::PREFER_DEVICE,
-        //         BufferUsage::STORAGE_BUFFER
-        //             | BufferUsage::TRANSFER_DST
-        //             | BufferUsage::VERTEX_BUFFER,
-        //     );
-
-        //     ret = true;
-        // }
-        // resize inits buffer
-        // if self.renderer_inits_buffer.len() < self.renderer_inits.len() as u64 {
-        //     let new_size = self.renderer_inits.len().next_power_of_two() as u64;
-        //     self.renderer_inits_buffer = self.gpu.buffer_array(
-        //         new_size,
-        //         MemoryTypeFilter::PREFER_DEVICE,
-        //         BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
-        //     );
-        //     ret = true;
-        // }
-        // // resize uninits buffer
-        // if self.renderer_uninits_buffer.len() < self.renderer_uninits.len() as u64 {
-        //     let new_size = self.renderer_uninits.len().next_power_of_two() as u64;
-        //     self.renderer_uninits_buffer = self.gpu.buffer_array(
-        //         new_size,
-        //         MemoryTypeFilter::PREFER_DEVICE,
-        //         BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
-        //     );
-        //     ret = true;
-        // }
         let renderer_inits_len = self.renderer_inits_buffer.data_len();
         let renderer_uninits_len = self.renderer_uninits_buffer.data_len();
         self.renderer_inits_buffer.upload_delta(&self.gpu, builder);
-        self.renderer_uninits_buffer.upload_delta(&self.gpu, builder);
+        self.renderer_uninits_buffer
+            .upload_delta(&self.gpu, builder);
         self.renderer_inits_buffer.clear();
         self.renderer_uninits_buffer.clear();
 
-        if self.indirect_draw_commands_len < self.indirect_commands.len() {
-            let delta = self.indirect_commands.len() - self.indirect_draw_commands_len;
-            let buf = self
-                .gpu
-                .sub_alloc(BufferUsage::STORAGE_BUFFER)
-                .allocate_slice(delta as u64)
-                .unwrap();
-            {
-                let mut write_lock = buf.write().unwrap();
-                write_lock
-                    .copy_from_slice(&self.indirect_commands[self.indirect_draw_commands_len..]);
-            }
-            if self.indirect_commands_buffer.len() < self.indirect_commands.len() as u64 {
-                let new_size = self.indirect_commands.len().next_power_of_two() as u64;
-                let new_buf = self.gpu.buffer_array(
-                    new_size,
-                    MemoryTypeFilter::PREFER_DEVICE,
-                    BufferUsage::INDIRECT_BUFFER
-                        | BufferUsage::TRANSFER_DST
-                        | BufferUsage::STORAGE_BUFFER,
-                );
-                builder
-                    .copy_buffer(CopyBufferInfo::buffers(
-                        self.indirect_commands_buffer.clone(),
-                        new_buf.clone(),
-                    ))
-                    .unwrap();
-                self.indirect_commands_buffer = new_buf;
-                ret = true;
-            }
-            builder
-                .copy_buffer(CopyBufferInfo::buffers(
-                    buf.clone(),
-                    self.indirect_commands_buffer.clone().slice(
-                        self.indirect_draw_commands_len as u64..self.indirect_commands.len() as u64,
-                    ),
-                ))
-                .unwrap();
-            self.indirect_draw_commands_len = self.indirect_commands.len();
-        }
+        self.indirect_commands_buffer
+            .upload_delta(&self.gpu, builder);
 
         if self.command_buffer.is_none() || ret {
             let mut builder = self
@@ -358,13 +215,13 @@ impl RenderingSystem {
                 layout_0.clone(),
                 [
                     WriteDescriptorSet::buffer(0, model_matrices.clone()),
-                    WriteDescriptorSet::buffer(1, self.mvp_buffer.buf().clone()),
-                    WriteDescriptorSet::buffer(2, self.renderer_buffer.buf().clone()),
-                    WriteDescriptorSet::buffer(3, self.renderer_inits_buffer.buf().clone()),
-                    WriteDescriptorSet::buffer(4, self.renderer_uninits_buffer.buf().clone()),
-                    WriteDescriptorSet::buffer(5, self.model_indirect_buffer.clone()),
-                    WriteDescriptorSet::buffer(6, self.workgroup_sums_buffer.clone()),
-                    WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.clone()),
+                    WriteDescriptorSet::buffer(1, self.mvp_buffer.buf()),
+                    WriteDescriptorSet::buffer(2, self.renderer_buffer.buf()),
+                    WriteDescriptorSet::buffer(3, self.renderer_inits_buffer.buf()),
+                    WriteDescriptorSet::buffer(4, self.renderer_uninits_buffer.buf()),
+                    WriteDescriptorSet::buffer(5, self.model_indirect_buffer.buf()),
+                    WriteDescriptorSet::buffer(6, self.workgroup_sums_buffer.buf()),
+                    WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.buf()),
                 ],
                 [],
             )
@@ -416,26 +273,6 @@ impl RenderingSystem {
             self.command_buffer = Some(builder.build().unwrap());
         }
 
-        // allocate temp buffers and copy data
-        // let renderer_inits_buf = self
-        //     .gpu
-        //     .sub_alloc(BufferUsage::STORAGE_BUFFER)
-        //     .allocate_slice(self.renderer_inits.len().max(1) as u64)
-        //     .unwrap();
-        // if self.renderer_inits.len() > 0 {
-        //     let mut write_lock = renderer_inits_buf.write().unwrap();
-        //     write_lock.copy_from_slice(&self.renderer_inits);
-        // }
-        // let renderer_uninits_buf = self
-        //     .gpu
-        //     .sub_alloc(BufferUsage::STORAGE_BUFFER)
-        //     .allocate_slice(self.renderer_uninits.len().max(1) as u64)
-        //     .unwrap();
-        // if self.renderer_uninits.len() > 0 {
-        //     let mut write_lock = renderer_uninits_buf.write().unwrap();
-        //     write_lock.copy_from_slice(&self.renderer_uninits);
-        // }
-
         let dispatch_buf = self
             .gpu
             .sub_alloc(BufferUsage::INDIRECT_BUFFER)
@@ -450,110 +287,27 @@ impl RenderingSystem {
             let mut write_lock = dispatch_buf.write().unwrap();
             let mut stage_lock = stage_buf.write().unwrap();
 
-            // stage 0, 0 init renderers
-            write_lock[0] = DispatchIndirectCommand {
-                x: renderer_inits_len.div_ceil(64) as u32,
-                y: 1,
-                z: 1,
+            let mut set_dispatch_stage = |x: usize, i: usize, stage: u32, pass: u32| {
+                write_lock[i] = DispatchIndirectCommand {
+                    x: x.div_ceil(64) as u32,
+                    y: 1,
+                    z: 1,
+                };
+                stage_lock[i] = cs::Stage {
+                    num_jobs: x as u32,
+                    stage,
+                    pass,
+                };
             };
-            stage_lock[0] = cs::Stage {
-                num_jobs: renderer_inits_len as u32,
-                stage: 0,
-                pass: 0,
-            };
-
-            // stage 0, 1 uninit renderers
-            write_lock[1] = DispatchIndirectCommand {
-                x: renderer_uninits_len.div_ceil(64) as u32,
-                y: 1,
-                z: 1,
-            };
-            stage_lock[1] = cs::Stage {
-                num_jobs: renderer_uninits_len as u32,
-                stage: 0,
-                pass: 1,
-            };
-
-            // stage 1 reset indirects
-            write_lock[2] = DispatchIndirectCommand {
-                x: self.indirect_commands.len().div_ceil(64) as u32,
-                y: 1,
-                z: 1,
-            };
-            stage_lock[2] = cs::Stage {
-                num_jobs: self.indirect_commands.len() as u32,
-                stage: 1,
-                pass: 0,
-            };
-
-            // stage 2 count instances
-            write_lock[3] = DispatchIndirectCommand {
-                x: self.renderer_storage.len().div_ceil(64) as u32,
-                y: 1,
-                z: 1,
-            };
-            stage_lock[3] = cs::Stage {
-                num_jobs: self.renderer_storage.len() as u32,
-                stage: 2,
-                pass: 0,
-            };
-
-            // stage 3, 0 prefix sum - local scan
-            write_lock[4] = DispatchIndirectCommand {
-                x: self.indirect_commands.len().div_ceil(64) as u32,
-                y: 1,
-                z: 1,
-            };
-            stage_lock[4] = cs::Stage {
-                num_jobs: self.indirect_commands.len() as u32,
-                stage: 3,
-                pass: 0,
-            };
-            // stage 3, 1 prefix sum - global scan
-            write_lock[5] = DispatchIndirectCommand { x: 1, y: 1, z: 1 };
-            stage_lock[5] = cs::Stage {
-                num_jobs: 64 as u32,
-                stage: 3,
-                pass: 1,
-            };
-            // stage 3, 2 prefix sum - add sums
-            write_lock[6] = DispatchIndirectCommand {
-                x: self.indirect_commands.len().div_ceil(64) as u32,
-                y: 1,
-                z: 1,
-            };
-            stage_lock[6] = cs::Stage {
-                num_jobs: self.indirect_commands.len() as u32,
-                stage: 3,
-                pass: 2,
-            };
-            // stage 4 generate draw commands
-            write_lock[7] = DispatchIndirectCommand {
-                x: self.renderer_storage.len().div_ceil(64) as u32,
-                y: 1,
-                z: 1,
-            };
-            stage_lock[7] = cs::Stage {
-                num_jobs: self.renderer_storage.len() as u32,
-                stage: 4,
-                pass: 0,
-            };
+            set_dispatch_stage(renderer_inits_len, 0, 0, 0); // stage 0, 0 init renderers
+            set_dispatch_stage(renderer_uninits_len, 1, 0, 1); // stage 0, 1 uninit renderers
+            set_dispatch_stage(self.indirect_commands_buffer.data_len(), 2, 1, 0); // stage 1 reset indirects
+            set_dispatch_stage(self.renderer_storage.len(), 3, 2, 0); // stage 2 count instances
+            set_dispatch_stage(self.indirect_commands_buffer.data_len(), 4, 3, 0); // stage 3, 0 prefix sum - local scan
+            set_dispatch_stage(64, 5, 3, 1); // stage 3, 1 prefix sum - global scan
+            set_dispatch_stage(self.indirect_commands_buffer.data_len(), 6, 3, 2); // stage 3, 2 prefix sum - add sums
+            set_dispatch_stage(self.renderer_storage.len(), 7, 4, 0); // stage 4 generate draw commands
         }
-
-        // self.renderer_inits.clear();
-        // self.renderer_uninits.clear();
-
-        // builder
-        //     .copy_buffer(CopyBufferInfo::buffers(
-        //         renderer_inits_buf,
-        //         self.renderer_inits_buffer.buf().clone(),
-        //     ))
-        //     .unwrap()
-        //     .copy_buffer(CopyBufferInfo::buffers(
-        //         renderer_uninits_buf,
-        //         self.renderer_uninits_buffer.buf().clone(),
-        //     ))
-        //     .unwrap()
         builder
             .copy_buffer(CopyBufferInfo::buffers(dispatch_buf, self.dispatch.clone()))
             .unwrap()
@@ -569,13 +323,6 @@ impl RenderingSystem {
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         model_matrices: Subbuffer<[[[f32; 4]; 4]]>,
     ) {
-        // builder
-        //     .copy_buffer(CopyBufferInfo::buffers(
-        //         cam,
-        //         self.cam_buffer.clone()
-        //     ))
-        //     .unwrap();
-
         builder
             .bind_pipeline_compute(self.pipeline.clone())
             .unwrap();
@@ -585,13 +332,13 @@ impl RenderingSystem {
             layout_0.clone(),
             [
                 WriteDescriptorSet::buffer(0, model_matrices),
-                WriteDescriptorSet::buffer(1, self.mvp_buffer.buf().clone()),
-                WriteDescriptorSet::buffer(2, self.renderer_buffer.buf().clone()),
+                WriteDescriptorSet::buffer(1, self.mvp_buffer.buf()),
+                WriteDescriptorSet::buffer(2, self.renderer_buffer.buf()),
                 WriteDescriptorSet::buffer(3, self.gpu.empty.clone()),
                 WriteDescriptorSet::buffer(4, self.gpu.empty.clone()),
-                WriteDescriptorSet::buffer(5, self.model_indirect_buffer.clone()),
+                WriteDescriptorSet::buffer(5, self.model_indirect_buffer.buf()),
                 WriteDescriptorSet::buffer(6, self.gpu.empty.clone()),
-                WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.clone()),
+                WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.buf()),
             ],
             [],
         )
@@ -661,7 +408,12 @@ impl RenderingSystem {
                 )
                 .unwrap();
 
-                let offset = self.model_indirects[*model_idx as usize].offset + i as u32;
+                let offset = self
+                    .model_indirect_buffer
+                    .get_data(*model_idx as usize)
+                    .unwrap()
+                    .offset
+                    + i as u32;
                 builder
                     .bind_descriptor_sets(
                         PipelineBindPoint::Graphics,
@@ -686,7 +438,7 @@ impl RenderingSystem {
                     builder
                         .draw_indexed_indirect(
                             self.indirect_commands_buffer
-                                .clone()
+                                .buf()
                                 .slice((offset as u64)..(offset + 1) as u64),
                         )
                         .unwrap();

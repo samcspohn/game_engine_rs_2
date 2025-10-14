@@ -8,7 +8,7 @@ use vulkano::{
 
 use crate::gpu_manager::GPUManager;
 
-pub struct GPUVector<T> {
+pub struct GPUVec<T> {
     data: Vec<T>,
     buffer: Subbuffer<[T]>,
     size: usize,
@@ -16,7 +16,7 @@ pub struct GPUVector<T> {
     persist: bool,
 }
 
-impl<T> GPUVector<T>
+impl<T> GPUVec<T>
 where
     T: BufferContents + Copy,
 {
@@ -42,10 +42,11 @@ where
         &mut self,
         gpu: &GPUManager,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-    ) {
+    ) -> bool {
         if self.data.len() == self.size {
-            return;
+            return false;
         }
+        let mut ret = false;
         if self.data.len() > self.buffer.len() as usize {
             let buf = gpu.buffer_array(
                 self.data.capacity() as u64,
@@ -58,6 +59,7 @@ where
                     .unwrap();
             }
             self.buffer = buf;
+            ret = true;
         }
         let buf = gpu
             .sub_alloc(self.usage)
@@ -73,6 +75,44 @@ where
                 self.buffer.clone().slice(self.size as u64..),
             ))
             .unwrap();
+        ret
+    }
+    pub fn force_update(
+        &mut self,
+        gpu: &GPUManager,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    ) -> bool {
+        let mut ret = false;
+        if self.data.len() == 0 {
+            return false;
+        }
+        if self.data.len() > self.buffer.len() as usize {
+            let buf = gpu.buffer_array(
+                self.data.capacity() as u64,
+                MemoryTypeFilter::PREFER_DEVICE,
+                self.usage | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+            );
+            if self.persist {
+                builder
+                    .copy_buffer(CopyBufferInfo::buffers(self.buffer.clone(), buf.clone()))
+                    .unwrap();
+            }
+            self.buffer = buf;
+            ret = true;
+        }
+        let buf = gpu
+            .sub_alloc(self.usage)
+            .allocate_slice(self.data.len() as u64)
+            .unwrap();
+        {
+            let mut write = buf.write().unwrap();
+            write.copy_from_slice(&self.data);
+        }
+        builder
+            .copy_buffer(CopyBufferInfo::buffers(buf, self.buffer.clone()))
+            .unwrap();
+        self.size = self.data.len();
+        ret
     }
     pub fn clear(&mut self) {
         self.size = 0;
@@ -105,5 +145,11 @@ where
     }
     pub fn buffer_len(&self) -> usize {
         self.size
+    }
+    pub fn get_data(&self, i: usize) -> Option<&T> {
+        self.data.get(i)
+    }
+    pub fn get_data_mut(&mut self, i: usize) -> Option<&mut T> {
+        self.data.get_mut(i)
     }
 }

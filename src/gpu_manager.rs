@@ -7,6 +7,7 @@ use std::{
     },
 };
 
+use force_send_sync::SendSync;
 use parking_lot::{Mutex, RwLock};
 use vulkano::{
     Version, VulkanLibrary,
@@ -117,7 +118,7 @@ pub struct GPUManager {
     // pub sub_alloc: Arc<SubbufferAllocator>,
     // pub storage_alloc: Arc<SubbufferAllocator>,
     // pub ind_alloc: Arc<SubbufferAllocator>,
-    pub _sub_alloc: RwLock<HashMap<BufferUsage, Arc<SubbufferAllocator>>>,
+    pub _sub_alloc: RwLock<HashMap<BufferUsage, Arc<SendSync<SubbufferAllocator>>>>,
     pub work_queue: GPUWorkQueue,
     pub surface_format: Format,
     pub image_count: u32,
@@ -318,7 +319,7 @@ impl GPUManager {
         })
     }
 
-    pub fn sub_alloc(&self, usage: BufferUsage) -> Arc<SubbufferAllocator> {
+    pub fn sub_alloc(&self, usage: BufferUsage) -> Arc<SendSync<SubbufferAllocator>> {
         if let Some(alloc) = self
             ._sub_alloc
             .read()
@@ -326,7 +327,7 @@ impl GPUManager {
         {
             return alloc.clone();
         }
-        let alloc = Arc::new(SubbufferAllocator::new(
+        let alloc = unsafe { Arc::new(SendSync::new(SubbufferAllocator::new(
             self.mem_alloc.clone(),
             SubbufferAllocatorCreateInfo {
                 buffer_usage: usage | BufferUsage::TRANSFER_SRC,
@@ -334,7 +335,7 @@ impl GPUManager {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-        ));
+        ))) };
         self._sub_alloc
             .write()
             .insert(usage, alloc.clone());
@@ -379,6 +380,7 @@ impl GPUManager {
                 // res.get_results(&mut query_results, QueryResultFlags::WAIT)
                 //     .unwrap();
             }
+            std::thread::yield_now();
         }
 
         // todo!();

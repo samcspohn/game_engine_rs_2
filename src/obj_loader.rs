@@ -154,7 +154,7 @@ impl Asset for Obj {
                         };
                         let texture_clone = Arc::clone(&texture);
                         asset.enqueue_work(move |a| {
-                            let handle = a.load_asset::<Texture>(&tex_path);
+                            let handle = a.load_asset::<Texture>(&tex_path, None);
                             *texture_clone.lock() = Some(handle.clone());
                             handle
                         });

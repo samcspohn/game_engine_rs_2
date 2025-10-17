@@ -22,7 +22,7 @@ use vulkano::{
 
 use crate::{
     asset_manager::{Asset, AssetHandle, AssetManager},
-    gpu_manager::{GPUManager, gpu_vec::GPUVec},
+    gpu_manager::{GPUManager, gpu_vec::GpuVec},
     obj_loader::Obj,
     renderer,
     transform::Transform,
@@ -48,18 +48,20 @@ pub struct RenderingSystem {
     pipeline: Arc<ComputePipeline>,
     pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
     // buffers
-    indirect_commands_buffer: GPUVec<DrawIndexedIndirectCommand>,
-    renderer_buffer: GPUVec<Renderer>,
-    renderer_inits_buffer: GPUVec<cs::RendererInit>,
-    renderer_uninits_buffer: GPUVec<u32>,
-    model_indirect_buffer: GPUVec<cs::ModelIndirect>, // [indirect_offset, count]
-    mvp_buffer: GPUVec<[[f32; 4]; 4]>,
-    workgroup_sums_buffer: GPUVec<u32>,
+    indirect_commands_buffer: GpuVec<DrawIndexedIndirectCommand>,
+    renderer_buffer: GpuVec<Renderer>,
+    renderer_inits_buffer: GpuVec<cs::RendererInit>,
+    renderer_uninits_buffer: GpuVec<u32>,
+    model_indirect_buffer: GpuVec<cs::ModelIndirect>, // [indirect_offset, count]
+    mvp_buffer: GpuVec<[[f32; 4]; 4]>,
+    workgroup_sums_buffer: GpuVec<u32>,
     stages: Subbuffer<[cs::Stage]>,
     dispatch: Subbuffer<[DispatchIndirectCommand]>,
     // data
     // model_indirect_buffer_len: usize,
-    model_map: HashMap<u32, u32>, // maps
+    model_map: HashMap<u32, u32>, // model_id -> intermediate idx
+    indirect_map: HashMap<u32, u32>, // intermediate -> model_indirect_buffer idx
+    intermediate_counter: AtomicU32,
     renderer_storage: Storage<Renderer>,
     // model_indirects: Vec<cs::ModelIndirect>,
 }
@@ -77,7 +79,7 @@ impl RendererComponent {
         id
     }
 }
-
+const NUM_STAGES: u64 = 9;
 impl RenderingSystem {
     pub fn new(gpu: Arc<GPUManager>) -> Self {
         let shader = cs::load(gpu.device.clone()).unwrap();
@@ -98,52 +100,63 @@ impl RenderingSystem {
         Self {
             command_buffer: None,
             pipeline,
-            indirect_commands_buffer: GPUVec::new(
+            indirect_commands_buffer: GpuVec::new(
                 &gpu,
                 BufferUsage::INDIRECT_BUFFER | BufferUsage::STORAGE_BUFFER,
                 true,
             ),
-            renderer_buffer: GPUVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
-            model_indirect_buffer: GPUVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
-            mvp_buffer: GPUVec::new(
+            renderer_buffer: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
+            model_indirect_buffer: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
+            mvp_buffer: GpuVec::new(
                 &gpu,
                 BufferUsage::STORAGE_BUFFER | BufferUsage::VERTEX_BUFFER,
                 false,
             ),
-            renderer_inits_buffer: GPUVec::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
-            renderer_uninits_buffer: GPUVec::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
-            workgroup_sums_buffer: GPUVec::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
+            renderer_inits_buffer: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
+            renderer_uninits_buffer: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
+            workgroup_sums_buffer: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
             stages: gpu.buffer_array(
-                8,
+                NUM_STAGES,
                 MemoryTypeFilter::PREFER_DEVICE,
                 BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
             ),
             dispatch: gpu.buffer_array(
-                8,
+                NUM_STAGES,
                 MemoryTypeFilter::PREFER_DEVICE,
                 BufferUsage::INDIRECT_BUFFER | BufferUsage::TRANSFER_DST,
             ),
             gpu,
-            // model_indirect_buffer_len: 0,
             model_map: HashMap::new(),
+            indirect_map: HashMap::new(),
+            intermediate_counter: AtomicU32::new(0),
             renderer_storage: Storage::new(),
-            // model_indirects: Vec::new(),
-            // indirect_commands: Vec::new(),
         }
     }
-    pub fn register_model(&mut self, model: AssetHandle<Obj>, assets: &AssetManager) {
+    pub fn register_model_handle(&mut self, model: AssetHandle<Obj>) {
+        let m_id = model.asset_id;
+        if !self.model_map.contains_key(&m_id) {
+            let idx = self.intermediate_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.indirect_map.insert(idx, 0); // placeholder
+            self.model_map.insert(m_id, idx); // placeholder
+        }
+    }
+    pub fn register_model(&mut self, model: AssetHandle<Obj>, asset: Arc<Obj>) {
         let m_id = model.asset_id;
         // let m_idx = model.get(assets).id;
         // let t_idx = transform.get_idx();
+
+        let intermediate_idx = *self.model_map.get(&m_id).expect("Model not pre-registered");
+        let model_indirect_buffer_idx = self.model_indirect_buffer.data_len() as u32;
+        self.indirect_map.insert(intermediate_idx, model_indirect_buffer_idx);
+
         let indirect_offset = self.indirect_commands_buffer.data_len() as u32;
-        let count = model.get(assets).meshes.len() as u32;
-        let a = self.model_indirect_buffer.data_len();
-        self.model_map.insert(m_id, a as u32);
+        let count = asset.meshes.len() as u32;
+        // self.model_map.insert(m_id, a as u32);
         self.model_indirect_buffer.push_data(cs::ModelIndirect {
             offset: indirect_offset,
             count,
         });
-        for mesh in &model.get(assets).meshes {
+        for mesh in &asset.meshes {
             self.indirect_commands_buffer
                 .push_data(DrawIndexedIndirectCommand {
                     index_count: mesh.indices.len() as u32,
@@ -153,6 +166,7 @@ impl RenderingSystem {
                     first_instance: 0,
                 });
         }
+        self.command_buffer = None; // invalidate command buffer
     }
     pub fn renderer(
         &mut self,
@@ -179,8 +193,9 @@ impl RenderingSystem {
     ) -> bool {
         let mut ret = false;
         let num_workgroups = self.indirect_commands_buffer.data_len().div_ceil(64).max(1) as u32;
-        ret |= self.workgroup_sums_buffer
-            .resize_buffer(num_workgroups as usize, &self.gpu, builder);
+        ret |=
+            self.workgroup_sums_buffer
+                .resize_buffer(num_workgroups as usize, &self.gpu, builder);
         ret |= self.model_indirect_buffer.upload_delta(&self.gpu, builder);
         if assets_loaded {
             ret |= self.model_indirect_buffer.force_update(&self.gpu, builder);
@@ -201,7 +216,8 @@ impl RenderingSystem {
         self.renderer_inits_buffer.clear();
         self.renderer_uninits_buffer.clear();
 
-        self.indirect_commands_buffer
+        ret |= self.indirect_commands_buffer.data_len() != self.indirect_commands_buffer.buf_len();
+        ret |= self.indirect_commands_buffer
             .upload_delta(&self.gpu, builder);
 
         if self.command_buffer.is_none() || ret {
@@ -276,12 +292,12 @@ impl RenderingSystem {
         let dispatch_buf = self
             .gpu
             .sub_alloc(BufferUsage::INDIRECT_BUFFER)
-            .allocate_slice(8)
+            .allocate_slice(NUM_STAGES)
             .unwrap();
         let stage_buf = self
             .gpu
             .sub_alloc(BufferUsage::UNIFORM_BUFFER)
-            .allocate_slice(8)
+            .allocate_slice(NUM_STAGES)
             .unwrap();
         {
             let mut write_lock = dispatch_buf.write().unwrap();
@@ -306,7 +322,8 @@ impl RenderingSystem {
             set_dispatch_stage(self.indirect_commands_buffer.data_len(), 4, 3, 0); // stage 3, 0 prefix sum - local scan
             set_dispatch_stage(64, 5, 3, 1); // stage 3, 1 prefix sum - global scan
             set_dispatch_stage(self.indirect_commands_buffer.data_len(), 6, 3, 2); // stage 3, 2 prefix sum - add sums
-            set_dispatch_stage(self.renderer_storage.len(), 7, 4, 0); // stage 4 generate draw commands
+            set_dispatch_stage(self.indirect_commands_buffer.data_len(), 7, 4, 0); // stage 4, 0 reset instance counts
+            set_dispatch_stage(self.renderer_storage.len(), 8, 4, 1); // stage 4, 1 generate draw commands
         }
         builder
             .copy_buffer(CopyBufferInfo::buffers(dispatch_buf, self.dispatch.clone()))
@@ -352,29 +369,31 @@ impl RenderingSystem {
         )
         .unwrap();
         let layout2 = self.pipeline.layout().set_layouts().get(2).unwrap();
-        let set2 = DescriptorSet::new(
-            self.gpu.desc_alloc.clone(),
-            layout2.clone(),
-            [WriteDescriptorSet::buffer(
-                0,
-                self.stages.clone().slice(7..=7),
-            )],
-            [],
-        )
-        .unwrap();
-
-        builder
-            .bind_descriptor_sets(
-                PipelineBindPoint::Compute,
-                self.pipeline.layout().clone(),
-                0,
-                (set_0.clone(), set1.clone(), set2.clone()),
+        for i in 7..=8 {
+            let set2 = DescriptorSet::new(
+                self.gpu.desc_alloc.clone(),
+                layout2.clone(),
+                [WriteDescriptorSet::buffer(
+                    0,
+                    self.stages.clone().slice(i..=i),
+                )],
+                [],
             )
             .unwrap();
-        unsafe {
+
             builder
-                .dispatch_indirect(self.dispatch.clone().slice(7..=7))
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Compute,
+                    self.pipeline.layout().clone(),
+                    0,
+                    (set_0.clone(), set1.clone(), set2.clone()),
+                )
                 .unwrap();
+            unsafe {
+                builder
+                    .dispatch_indirect(self.dispatch.clone().slice(i..=i))
+                    .unwrap();
+            }
         }
     }
 
@@ -386,6 +405,7 @@ impl RenderingSystem {
         pipeline: Arc<GraphicsPipeline>,
     ) {
         for (model_id, model_idx) in &self.model_map {
+            let indirect_idx = *self.indirect_map.get(model_idx).unwrap();
             let obj = AssetHandle::<Obj>::_from_id(*model_id);
             let model = obj.get(assets);
             for (i, mesh) in model.meshes.iter().enumerate() {
@@ -410,7 +430,7 @@ impl RenderingSystem {
 
                 let offset = self
                     .model_indirect_buffer
-                    .get_data(*model_idx as usize)
+                    .get_data(indirect_idx as usize)
                     .unwrap()
                     .offset
                     + i as u32;

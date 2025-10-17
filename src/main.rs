@@ -19,7 +19,7 @@ use glam::Vec3;
 use gpu_manager::GPUManager;
 use obj_loader::Obj;
 use parking_lot::Mutex;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use render_context::RenderContext;
 use std::{
     any::TypeId,
@@ -28,6 +28,7 @@ use std::{
     error::Error,
     ops::Div,
     sync::{Arc, LazyLock},
+    thread::Thread,
     time,
 };
 use transform::{TransformHierarchy, compute::TransformCompute};
@@ -49,8 +50,8 @@ use winit::{
 };
 
 use crate::{
-    asset_manager::Asset,
-    transform::{_Transform, compute::PerfCounter},
+    asset_manager::{Asset, AssetHandle},
+    transform::{_Transform, Transform, compute::PerfCounter}, util::container::Container,
 };
 
 mod asset_manager;
@@ -65,6 +66,9 @@ mod transform;
 mod util;
 
 fn main() -> Result<(), impl Error> {
+    unsafe {
+        env::set_var("RUST_BACKTRACE", "1");
+    }
     let event_loop = EventLoop::new().unwrap();
     let mut app = App::new(&event_loop);
 
@@ -72,7 +76,11 @@ fn main() -> Result<(), impl Error> {
 }
 
 const MAX_FPS_SAMPLE_AGE: f32 = 1.0;
-const NUM_CUBES: usize = 1 << 20; // 1<<22 = 4,194,304
+// 1 << 20 = 1,048,576
+// 1 << 21 = 2,097,152
+// 1 << 22 = 4,194,304
+// 1 << 23 = 8,388,608
+const NUM_CUBES: usize = 1 << 20;
 struct FPS {
     frame_times: std::collections::VecDeque<f32>,
     frame_ages: std::collections::VecDeque<time::Instant>,
@@ -108,6 +116,18 @@ impl FPS {
     }
 }
 
+static mut TRANSLATION: Vec3 = Vec3::ZERO;
+struct ComponentTest {}
+impl ComponentTest {
+    fn new() -> Self {
+        Self {}
+    }
+    fn update(&mut self, dt: f32, t: &Transform) {
+        let t = t.lock();
+        t.translate_by(unsafe { TRANSLATION } * dt);
+    }
+}
+
 struct App {
     gpu: Arc<GPUManager>,
     asset_manager: asset_manager::AssetManager,
@@ -118,10 +138,11 @@ struct App {
     fps: FPS,
     time: std::time::Instant,
     camera: HashMap<WindowId, Arc<Mutex<camera::Camera>>>,
-    transform_hierarchy: TransformHierarchy,
+    transform_hierarchy: Arc<Mutex<TransformHierarchy>>,
     transform_compute: TransformCompute,
-    rendering_system: renderer::RenderingSystem,
+    rendering_system: Arc<Mutex<renderer::RenderingSystem>>,
     renderers: Vec<renderer::RendererComponent>,
+    component_test: Arc<Mutex<Container<(u32, ComponentTest)>>>,
     // update_transforms: bool,
     transforms_updated: bool,
     // builder: Option<AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>>,
@@ -131,6 +152,9 @@ struct App {
     update_render: PerfCounter,
     paused: bool,
     update_transforms_compute_shader: bool,
+    sim_thread: std::thread::JoinHandle<()>,
+    sim_frame_start: std::sync::mpsc::SyncSender<f32>,
+    sim_frame_end: std::sync::mpsc::Receiver<()>,
 }
 
 impl App {
@@ -139,7 +163,6 @@ impl App {
             env::set_var("RUST_BACKTRACE", "1");
         }
         let gpu = gpu_manager::GPUManager::new(event_loop);
-
         // let vertices = [
         //     MyVertex {
         //         position: [-0.5 / 10.0, -0.25 / 10.0],
@@ -169,31 +192,52 @@ impl App {
         let mut asset_manager = asset_manager::AssetManager::new(gpu.clone());
         let default_obj = asset_manager.set_placeholder_asset(Obj::default(&gpu));
         asset_manager.set_placeholder_asset(texture::Texture::default(&gpu));
-        let cube = asset_manager.load_asset::<Obj>("assets/cube/cube.obj");
 
-        let mut previous_frame_end = Some(sync::now(gpu.device.clone()).boxed());
-
-        let mut transform_compute = TransformCompute::new(&gpu);
+        let transform_compute = TransformCompute::new(&gpu);
         let mut transform_hierarchy = TransformHierarchy::new();
-        let mut rendering_system = renderer::RenderingSystem::new(gpu.clone());
+        let rendering_system = Arc::new(Mutex::new(renderer::RenderingSystem::new(gpu.clone())));
+        rendering_system
+            .lock()
+            .register_model_handle(AssetHandle::<Obj>::_from_id(0));
+        rendering_system
+            .lock()
+            .register_model(AssetHandle::<Obj>::_from_id(0), default_obj.clone());
 
-        while Arc::ptr_eq(
-            &(cube.get(&asset_manager) as Arc<dyn Asset>),
-            asset_manager
-                .placeholder_assets
-                .lock()
-                .get(&TypeId::of::<Obj>())
-                .unwrap(),
-        ) {
-            // wait until the cube is loaded
-            asset_manager.process_deferred_queue();
-            gpu.process_work_queue();
-            previous_frame_end.as_mut().unwrap().cleanup_finished();
-        }
-        rendering_system.register_model(cube.clone(), &asset_manager);
+        let _r = rendering_system.clone();
+        let cube = asset_manager.load_asset::<Obj>(
+            "assets/cube/cube.obj",
+            Some(Box::new(move |handle, arc_asset| {
+                let mut __r = _r.lock();
+                __r.register_model(handle, arc_asset);
+            })),
+        );
+        rendering_system.lock().register_model_handle(cube.clone());
+
+        // let mut previous_frame_end = Some(sync::now(gpu.device.clone()).boxed());
+
+        // while Arc::ptr_eq(
+        //     &(cube.get(&asset_manager) as Arc<dyn Asset>),
+        //     asset_manager
+        //         .placeholder_assets
+        //         .lock()
+        //         .get(&TypeId::of::<Obj>())
+        //         .unwrap(),
+        // ) {
+        //     // wait until the cube is loaded
+        //     asset_manager.process_deferred_queue();
+        //     gpu.process_work_queue();
+        //     previous_frame_end.as_mut().unwrap().cleanup_finished();
+        // }
+        // rendering_system.register_model(cube.clone(), &asset_manager);
         let mut renderers = Vec::new();
+        let component_test = Arc::new(Mutex::new(Container::new(
+            rayon::current_num_threads(),
+        )));
+
+        let mut _component_test = component_test.lock();
 
         let dims = (NUM_CUBES as f64).powf(1.0 / 3.0).ceil() as u32;
+        let mut _rendering_system = rendering_system.lock();
         for i in 0..NUM_CUBES {
             let x = (i as u32 % dims) as f32;
             let y = ((i as u32 / dims) % dims) as f32;
@@ -219,39 +263,113 @@ impl App {
                 parent: None,
             };
             let transform = transform_hierarchy.create_transform(t);
-            let r = rendering_system.renderer(cube.clone(), &transform, &mut asset_manager);
+            _component_test.insert((
+                transform.get_idx() as u32,
+                ComponentTest::new(),
+            ));
+            let r = _rendering_system.renderer(cube.clone(), &transform, &mut asset_manager);
             renderers.push(r);
         }
+        drop(_rendering_system);
+        drop(_component_test);
 
-        let mut builder = gpu.create_command_buffer(CommandBufferUsage::OneTimeSubmit);
+        // let mut builder = gpu.create_command_buffer(CommandBufferUsage::OneTimeSubmit);
 
-        let (updated, staging_buffer_index) =
-            transform_compute.update_transforms(&gpu, &transform_hierarchy, &mut builder, true);
-        let command_buffer = builder.build().unwrap();
+        // let (updated, staging_buffer_index) = transform_compute.update_transforms(
+        //     &gpu,
+        //     &transform_hierarchy,
+        //     &mut builder,
+        //     true,
+        //     previous_frame_end.as_mut().unwrap(),
+        // );
+        // let command_buffer = builder.build().unwrap();
 
-        // execute buffer copies and global compute shaders
-        previous_frame_end = Some(
-            previous_frame_end
-                .take()
-                .unwrap()
-                .then_execute(gpu.queue.clone(), command_buffer)
-                .unwrap()
-                .then_signal_semaphore()
-                .then_execute(
-                    gpu.queue.clone(),
-                    transform_compute.command_buffer[staging_buffer_index].clone(),
-                )
-                .unwrap()
-                .then_signal_semaphore()
-                .boxed(),
-        );
+        // // execute buffer copies and global compute shaders
+        // previous_frame_end = Some(
+        //     previous_frame_end
+        //         .take()
+        //         .unwrap()
+        //         .then_execute(gpu.queue.clone(), command_buffer)
+        //         .unwrap()
+        //         .then_signal_semaphore()
+        //         .then_execute(
+        //             gpu.queue.clone(),
+        //             transform_compute.command_buffer[staging_buffer_index].clone(),
+        //         )
+        //         .unwrap()
+        //         .then_signal_semaphore()
+        //         .boxed(),
+        // );
+
+        let transform_hierarchy = Arc::new(Mutex::new(transform_hierarchy));
+        let (sim_frame_start, sim_frame_start_rcv) = std::sync::mpsc::sync_channel::<f32>(1);
+        let (sim_frame_end_snd, sim_frame_end_rcv) = std::sync::mpsc::sync_channel::<()>(1);
+        let transform_hierarchy_clone = transform_hierarchy.clone();
+        let component_test_clone = component_test.clone();
+        // thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Crossplatform(
+        //                 48u8.try_into().unwrap(),
+        //             )).unwrap();
+
+        let sim_thread = std::thread::spawn(move || {
+            sim_frame_end_snd.send(()).unwrap();
+            let transform_hierarchy = transform_hierarchy_clone;
+            let component_test = component_test_clone;
+            loop {
+                let dt = sim_frame_start_rcv.recv().unwrap();
+                // println!("Sim thread received dt: {}", dt);
+                // perform any simulation updates here
+                let time_since_epoch = std::time::SystemTime::now()
+                    .duration_since(time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64();
+                let angle = time_since_epoch % std::f64::consts::TAU;
+                let angle = angle as f32;
+                unsafe { TRANSLATION = Vec3::new(angle.cos(), 0.0, angle.sin()) * 5.0; }
+                let translation = unsafe { TRANSLATION * dt};
+                // let rhs = (NUM_CUBES as f32).sqrt().sqrt().sqrt().ceil() as usize;
+                // let chunk_size: usize = NUM_CUBES.div_ceil(rhs);
+                // let nt = rayon::current_num_threads();
+                let nt = rayon::current_num_threads() - 4;
+                // let chunk_size: usize = util::get_chunk_size(NUM_CUBES);
+                let chunk_size: f32 = NUM_CUBES as f32 / nt as f32;
+                // let chunk_size = 256.0f32.max(chunk_size).min(16_384.0) as usize;
+                // let chunk_size = 16_384f32;
+                let _transform_hierarchy = transform_hierarchy.lock();
+                // let t: &TransformHierarchy = &_transform_hierarchy;
+                // component_test.lock().for_each(move |ct| {
+                //     let transform = t.get_transform(ct.0).unwrap();
+                //     ct.1.update(dt, &transform);
+                // });
+                // thread_pool.install(|| {
+                (0..nt).into_par_iter().for_each(|i| {
+                    let start = (i as f32 * chunk_size) as usize;
+                    let end = ((i + 1) as f32 * chunk_size).min(NUM_CUBES as f32) as usize;
+                    for j in start..end {
+                        if let Some(t) = _transform_hierarchy.get_transform(j as u32) {
+                            let t = t.lock();
+                            t.translate_by(translation);
+                        }
+                    }
+                });
+                // let transform_hierarchy = transform_hierarchy.lock();
+                // (0..NUM_CUBES).into_par_iter().for_each(|i| {
+                //     if let Some(t) = transform_hierarchy.get_transform(i as u32) {
+                //         let mut t = t.lock();
+                //         t.translate_by(translation);
+                //     }
+                // });
+                // });
+                sim_frame_end_snd.send(()).unwrap();
+            }
+            // });
+        });
 
         App {
             asset_manager,
             transform_compute,
             rendering_system,
             renderers,
-            previous_frame_end,
+            previous_frame_end: Some(sync::now(gpu.device.clone()).boxed()),
             gpu,
             cube: Some(cube),
             rcxs: HashMap::new(),
@@ -260,6 +378,7 @@ impl App {
             camera: HashMap::new(),
             cursor_grabbed: false,
             transform_hierarchy,
+            component_test,
             // update_transforms: true,
             transforms_updated: false,
             // builder: None,
@@ -268,6 +387,9 @@ impl App {
             update_render: PerfCounter::new(),
             paused: false,
             update_transforms_compute_shader: true,
+            sim_thread,
+            sim_frame_start,
+            sim_frame_end: sim_frame_end_rcv,
         }
     }
 }
@@ -426,9 +548,7 @@ impl ApplicationHandler for App {
                     rcx.rebuild_command_buffer(
                         gpu,
                         &self.asset_manager,
-                        // &self.offsets,
-                        self.cube.as_ref().unwrap(),
-                        &mut self.rendering_system,
+                        &mut self.rendering_system.lock(),
                         self.transform_compute.model_matrix_buffer.clone(),
                     );
                 }
@@ -506,33 +626,44 @@ impl ApplicationHandler for App {
         self.time = t;
         self.transforms_updated = false;
 
-        if self.cube.is_none() {
-            self.cube = Some(self.asset_manager.load_asset::<Obj>("assets/cube/cube.obj"));
-        }
+        // if self.cube.is_none() {
+        //     self.cube = Some(self.asset_manager.load_asset::<Obj>("assets/cube/cube.obj"));
+        // }
         self.update_sim.start();
         if !self.paused {
-            let time_since_epoch = std::time::SystemTime::now()
-                .duration_since(time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs_f64();
-            let angle = time_since_epoch % std::f64::consts::TAU;
-            let angle = angle as f32;
-            let translation = Vec3::new(angle.cos(), 0.0, angle.sin()) * elapsed * 5.0;
-            // let rhs = (NUM_CUBES as f32).sqrt().sqrt().sqrt().ceil() as usize;
-            // let chunk_size: usize = NUM_CUBES.div_ceil(rhs);
-            let nt = rayon::current_num_threads();
-            // let chunk_size: usize = util::get_chunk_size(NUM_CUBES);
-            let chunk_size: f32 = NUM_CUBES as f32 / nt as f32;
-            (0..nt).into_par_iter().for_each(|i| {
-                let start = (i as f32 * chunk_size) as usize;
-                let end = ((i + 1) as f32 * chunk_size).min(NUM_CUBES as f32) as usize;
-                for j in start..end {
-                    if let Some(t) = self.transform_hierarchy.get_transform(j as u32) {
-                        let t = t.lock();
-                        t.translate_by(translation);
-                    }
-                }
-            });
+            self.sim_frame_end.recv().unwrap();
+            // let time_since_epoch = std::time::SystemTime::now()
+            //     .duration_since(time::UNIX_EPOCH)
+            //     .unwrap()
+            //     .as_secs_f64();
+            // let angle = time_since_epoch % std::f64::consts::TAU;
+            // let angle = angle as f32;
+            // let translation = Vec3::new(angle.cos(), 0.0, angle.sin()) * elapsed * 5.0;
+            // // let rhs = (NUM_CUBES as f32).sqrt().sqrt().sqrt().ceil() as usize;
+            // // let chunk_size: usize = NUM_CUBES.div_ceil(rhs);
+            // let nt = rayon::current_num_threads();
+            // // let chunk_size: usize = util::get_chunk_size(NUM_CUBES);
+            // let chunk_size: f32 = NUM_CUBES as f32 / nt as f32;
+            // // let chunk_size = 256.0f32.max(chunk_size).min(16_384.0) as usize;
+            // // let chunk_size = 16_384f32;
+            // (0..nt).into_par_iter().for_each(|i| {
+            //     let start = (i as f32 * chunk_size as f32) as usize;
+            //     let end = ((i + 1) as f32 * chunk_size as f32).min(NUM_CUBES as f32) as usize;
+            //     for j in start..end {
+            //         if let Some(t) = self.transform_hierarchy.get_transform(j as u32) {
+            //             let t = t.lock();
+            //             t.translate_by(translation);
+            //         }
+            //     }
+            // });
+            // // (0..NUM_CUBES).into_par_iter().for_each(|i| {
+            // //     // chunk.into_iter().for_each(|i| {
+            // //         if let Some(t) = self.transform_hierarchy.get_transform(i as u32) {
+            // //             let t = t.lock();
+            // //             t.translate_by(translation);
+            // //         }
+            // //     // });
+            // // });
         }
         self.update_sim.stop();
         // // test performance of non-reuse of command buffers
@@ -552,12 +683,23 @@ impl ApplicationHandler for App {
             .gpu
             .create_command_buffer(CommandBufferUsage::OneTimeSubmit);
 
+        let transform_hierarchy = self.transform_hierarchy.lock();
         let (updated, staging_buffer_index) = self.transform_compute.update_transforms(
             &self.gpu,
-            &self.transform_hierarchy,
+            &transform_hierarchy,
             &mut builder,
             self.update_transforms_compute_shader,
+            self.previous_frame_end.as_mut().unwrap(),
         );
+        drop(transform_hierarchy);
+        if !self.paused {
+            match self.sim_frame_start.send(elapsed) {
+                Ok(_) => {}
+                Err(e) => {
+                    println!("Error sending to sim thread: {}", e);
+                }
+            }
+        }
         for (_window_id, rcx) in self.rcxs.iter_mut() {
             let cam = self.camera.get_mut(&_window_id).unwrap();
             cam.lock().update_uniform(
@@ -567,7 +709,8 @@ impl ApplicationHandler for App {
             );
         }
         self.update_render.start();
-        let renderer_updated = self.rendering_system.compute_renderers(
+        let mut rendering_system = self.rendering_system.lock();
+        let renderer_updated = rendering_system.compute_renderers(
             &mut builder,
             &self.transform_compute.model_matrix_buffer,
             self.asset_manager
@@ -594,16 +737,13 @@ impl ApplicationHandler for App {
                 .then_signal_semaphore()
                 .then_execute(
                     self.gpu.queue.clone(),
-                    self.rendering_system
-                        .command_buffer
-                        .as_ref()
-                        .unwrap()
-                        .clone(),
+                    rendering_system.command_buffer.as_ref().unwrap().clone(),
                 )
                 .unwrap()
                 .then_signal_semaphore()
                 .boxed(),
         );
+        drop(rendering_system);
 
         if self
             .asset_manager

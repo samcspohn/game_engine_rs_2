@@ -236,7 +236,7 @@ impl AssetManager {
             .or_insert_with(HashMap::new);
         arc_asset
     }
-    pub fn load_asset<T: Asset + 'static>(&mut self, path: &str) -> AssetHandle<T> {
+    pub fn load_asset<T: Asset + 'static>(&mut self, path: &str, callbk: Option<Box<dyn FnMut(AssetHandle<T>, Arc<T>) + Send + Sync>>) -> AssetHandle<T> {
         let type_id = TypeId::of::<T>();
         let ret = if let Some(assets) = self.loaded_assets_files.lock().get(&type_id) {
             if let Some(id) = assets.get(path) {
@@ -286,8 +286,15 @@ impl AssetManager {
                     let arc_asset = Arc::new(asset);
                     let mut assets_lock = loaded_assets.lock();
                     let assets = assets_lock.entry(type_id).or_insert_with(HashMap::new);
-                    assets.insert(asset_id, arc_asset);
+                    assets.insert(asset_id, arc_asset.clone());
                     rebuild_command_buffer.store(true, Ordering::SeqCst);
+                    if let Some(mut cb) = callbk {
+                        cb(AssetHandle {
+                            // asset: path.to_string(),
+                            asset_id,
+                            _marker: std::marker::PhantomData,
+                        }, arc_asset);
+                    }
                 }
                 Err(_) => {
                     // insert placeholder asset on error

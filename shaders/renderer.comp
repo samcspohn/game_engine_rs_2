@@ -42,7 +42,8 @@ layout(set = 0, binding = 7) buffer IndirectCommands {
 layout(set = 1, binding = 1) uniform camera {
   mat4 view;
   mat4 proj;
-} cam;
+}
+cam;
 
 layout(set = 2, binding = 0) uniform Stage {
   uint num_jobs;
@@ -110,13 +111,22 @@ void main() {
     }
   } break;
   case 4: {
-    Renderer r = renderers[idx];
-    mat4 model_matrix = model_matrices[r.t_idx];
-    ModelIndirect mc = model_indirect[r.m_id];
-    for (uint i = 0; i < mc.count; ++i) {
-      uint mvp_idx = indirect[mc.offset + i].firstInstance +
-                     atomicAdd(indirect[mc.offset + i].instanceCount, 1);
-      mvp[mvp_idx] = cam.proj * cam.view * model_matrix;
+    switch (pass) {
+    case 0: {
+      // reset instance counts to 0 for indirect draw
+      indirect[idx].instanceCount = 0;
+    } break;
+    case 1: {
+      // write indirect commands
+      Renderer r = renderers[idx];
+      mat4 model_matrix = model_matrices[r.t_idx];
+      ModelIndirect mc = model_indirect[r.m_id];
+      for (uint i = 0; i < mc.count; ++i) {
+        uint mvp_idx = indirect[mc.offset + i].firstInstance +
+                       atomicAdd(indirect[mc.offset + i].instanceCount, 1);
+        mvp[mvp_idx] = cam.proj * cam.view * model_matrix;
+      }
+    } break;
     }
   } break;
   }

@@ -138,15 +138,15 @@ pub struct _Transform {
 }
 
 pub struct TransformHierarchy {
-    mutexes: SegVec<Mutex<()>>,
-    positions: SegVec<SyncUnsafeCell<Vec3>>,
-    rotations: SegVec<SyncUnsafeCell<Quat>>,
-    scales: SegVec<SyncUnsafeCell<Vec3>>,
-    metadata: SegVec<SyncUnsafeCell<TransformMeta>>,
-    dirty: SegVec<AtomicU8>,
-    dirty_l2: SegVec<AtomicU32>, // one bit for every 32 transforms 1024 total per u32
-    has_children: SegVec<AtomicU32>,
-    active: SegVec<AtomicU32>,
+    mutexes: Vec<Mutex<()>>,
+    positions: Vec<SyncUnsafeCell<Vec3>>,
+    rotations: Vec<SyncUnsafeCell<Quat>>,
+    scales: Vec<SyncUnsafeCell<Vec3>>,
+    metadata: Vec<SyncUnsafeCell<TransformMeta>>,
+    dirty: Vec<AtomicU8>,
+    dirty_l2: Vec<AtomicU32>, // one bit for every 32 transforms 1024 total per u32
+    has_children: Vec<AtomicU32>,
+    active: Vec<AtomicU32>,
     avail: Avail,
     // pub buffers: SyncUnsafeCell<*mut TransformBuffers>,
 }
@@ -154,15 +154,15 @@ pub struct TransformHierarchy {
 impl TransformHierarchy {
     pub fn new() -> Self {
         Self {
-            mutexes: SegVec::new(),
-            positions: SegVec::new(),
-            rotations: SegVec::new(),
-            scales: SegVec::new(),
-            metadata: SegVec::new(),
-            dirty: SegVec::new(),
-            dirty_l2: SegVec::new(),
-            has_children: SegVec::new(),
-            active: SegVec::new(),
+            mutexes: Vec::new(),
+            positions: Vec::new(),
+            rotations: Vec::new(),
+            scales: Vec::new(),
+            metadata: Vec::new(),
+            dirty: Vec::new(),
+            dirty_l2: Vec::new(),
+            has_children: Vec::new(),
+            active: Vec::new(),
             avail: Avail::new(),
         }
     }
@@ -257,7 +257,7 @@ impl TransformHierarchy {
     fn mark_dirty(&self, t: &TransformGuard, component: TransformComponent) {
         let shift = (t.idx & 1) * 4; // Fixed: Added parentheses for correct precedence
         let flag = (component as u8) << shift;
-        self.dirty[t.idx >> 1].fetch_or(flag, Ordering::Relaxed);
+        unsafe { self.dirty.get_unchecked(t.idx >> 1).fetch_or(flag, Ordering::Relaxed) };
         // self.dirty_l2[t.idx >> 10].fetch_or(1 << ((t.idx >> 5) & 0b11111), Ordering::Relaxed);
     }
 
@@ -265,7 +265,7 @@ impl TransformHierarchy {
         let shift = (idx & 1) * 4; // Fixed: Added parentheses
         let mask = 0b1111 << shift;
         // Fixed: Use load to read without modifying; shift back to return only the 4 bits
-        (self.dirty[(idx >> 1) as usize].load(Ordering::Relaxed) & mask) >> shift
+        (unsafe { self.dirty.get_unchecked((idx >> 1) as usize ) }).load(Ordering::Relaxed) & mask >> shift
     }
 
     fn get_dirty_l2(&self, chunk_id: usize) -> u32 {
@@ -275,7 +275,7 @@ impl TransformHierarchy {
     fn mark_clean(&self, idx: u32) {
         let shift = (idx & 1) * 4; // Fixed: Added parentheses
         let mask = !(0b1111 << shift); // Fixed: Use NOT of the mask to clear the bits
-        self.dirty[(idx >> 1) as usize].fetch_and(mask, Ordering::Relaxed);
+        unsafe { self.dirty.get_unchecked((idx >> 1) as usize).fetch_and(mask, Ordering::Relaxed) };
     }
 
     fn _lock_internal<'a>(&'a self, idx: u32) -> TransformGuard<'a> {
@@ -287,13 +287,13 @@ impl TransformHierarchy {
         }
     }
     fn _scale(&self, idx: u32) -> &mut Vec3 {
-        unsafe { &mut *self.scales[idx as usize].get() }
+        unsafe { &mut *self.scales.get_unchecked(idx as usize).get() }
     }
     fn _position(&self, idx: u32) -> &mut Vec3 {
-        unsafe { &mut *self.positions[idx as usize].get() }
+        unsafe { &mut *self.positions.get_unchecked(idx as usize).get() }
     }
     fn _rotation(&self, idx: u32) -> &mut Quat {
-        unsafe { &mut *self.rotations[idx as usize].get() }
+        unsafe { &mut *self.rotations.get_unchecked(idx as usize).get() }
     }
     fn scale_by(&self, t: &TransformGuard, scale: Vec3) {
         let s = self._scale(t.idx as u32);

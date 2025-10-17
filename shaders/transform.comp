@@ -109,8 +109,6 @@ void main() {
       scales[idx] = vec3(u_scales[idx * 3], u_scales[idx * 3 + 1],
                           u_scales[idx * 3 + 2]);
     }
-    // parent_indices[idx] = -1; // temporarily disable parenting
-
   } break;
   case 1: {
     if (idx >= pc.count) {

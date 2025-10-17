@@ -23,7 +23,7 @@ use vulkano::{
         ComputePipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
         compute::ComputePipelineCreateInfo,
         layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayoutCreateInfo},
-    },
+    }, sync::GpuFuture,
 };
 
 use crate::gpu_manager::GPUManager;
@@ -261,7 +261,7 @@ impl TransformCompute {
                 MemoryTypeFilter::PREFER_DEVICE,
                 BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
             ),
-            staging_buffers: (0..gpu.image_count as usize)
+            staging_buffers: (0..gpu.image_count as usize + 2)
                 .map(|_| TransformUpdateBuffers::new(gpu))
                 .collect(),
             staging_buffer_index: 0,
@@ -312,6 +312,7 @@ impl TransformCompute {
         hierarchy: &TransformHierarchy,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         update_transforms_compute_shader: bool,
+        gpu_future: &mut Box<dyn GpuFuture>,
     ) -> (bool, usize) {
         let sbi = self.staging_buffer_index;
 
@@ -369,7 +370,15 @@ impl TransformCompute {
                     .collect(),
             );
             // if update_transforms_compute_shader {
-            let pos_cell = SyncUnsafeCell::new(self.staging_buffers[sbi].position.write().unwrap());
+            let position_buf = loop {
+                if let Ok(b) = self.staging_buffers[sbi].position.write() {
+                    break b;
+                } else {
+                    // println!("Waiting for position staging buffer write lock");
+                }
+                gpu_future.cleanup_finished();
+            };
+            let pos_cell = SyncUnsafeCell::new(position_buf);
             let rot_cell = SyncUnsafeCell::new(self.staging_buffers[sbi].rotation.write().unwrap());
             let scale_cell = SyncUnsafeCell::new(self.staging_buffers[sbi].scale.write().unwrap());
             let flags_cell = SyncUnsafeCell::new(self.staging_buffers[sbi].flags.write().unwrap());
@@ -384,8 +393,9 @@ impl TransformCompute {
             // const OUTER: usize = 32;
             let len = hierarchy.len();
             const INNER: usize = 32; // 32 transforms per flag u32
-            let outer: f32 = (len as f32 / INNER as f32 / rayon::current_num_threads() as f32);
-            (0..rayon::current_num_threads())
+            let nt = rayon::current_num_threads();
+            let outer: f32 = (len as f32 / INNER as f32 / nt as f32);
+            (0..nt)
                 .into_par_iter()
                 .for_each(|chunk_id| {
                     // let parent_updates = parent_updates.clone();

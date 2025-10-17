@@ -8,7 +8,7 @@ use vulkano::{
 
 use crate::gpu_manager::GPUManager;
 
-pub struct GPUVec<T> {
+pub struct GpuVec<T> {
     data: Vec<T>,
     buffer: Subbuffer<[T]>,
     size: usize,
@@ -16,7 +16,7 @@ pub struct GPUVec<T> {
     persist: bool,
 }
 
-impl<T> GPUVec<T>
+impl<T> GpuVec<T>
 where
     T: BufferContents + Copy,
 {
@@ -143,7 +143,7 @@ where
     pub fn data_len(&self) -> usize {
         self.data.len()
     }
-    pub fn buffer_len(&self) -> usize {
+    pub fn buf_len(&self) -> usize {
         self.size
     }
     pub fn get_data(&self, i: usize) -> Option<&T> {

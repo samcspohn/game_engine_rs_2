@@ -66,6 +66,7 @@ pub struct RenderContext {
     pub execute_command_buffer_perf: crate::PerfCounter,
     pub cleanup: crate::PerfCounter,
     pub acquire_next_image_perf: crate::PerfCounter,
+    pub draw_gui_perf: crate::PerfCounter,
 }
 
 impl RenderContext {
@@ -104,7 +105,7 @@ impl RenderContext {
                         .into_iter()
                         .next()
                         .unwrap(),
-                    present_mode: vulkano::swapchain::PresentMode::Immediate,
+                    present_mode: vulkano::swapchain::PresentMode::Mailbox,
                     ..Default::default()
                 },
             )
@@ -210,6 +211,7 @@ impl RenderContext {
             swapchain.image_format(),
             GuiConfig {
                 is_overlay: true,
+                allow_srgb_render_target: true,
                 ..Default::default()
             },
         );
@@ -236,6 +238,7 @@ impl RenderContext {
             execute_command_buffer_perf: crate::PerfCounter::new(),
             cleanup: crate::PerfCounter::new(),
             acquire_next_image_perf: crate::PerfCounter::new(),
+            draw_gui_perf: crate::PerfCounter::new(),
         }
     }
 
@@ -262,9 +265,6 @@ impl RenderContext {
         &mut self,
         gpu: &GPUManager,
         assets: &AssetManager,
-        // offsets: &Vec<[f32; 3]>,
-        obj_handle: &AssetHandle<Obj>,
-        // instance_buffer: Subbuffer<[[[f32; 4]; 4]]>,
         rendering_system: &mut crate::renderer::RenderingSystem,
         model_matrices: Subbuffer<[[[f32; 4]; 4]]>,
     ) {

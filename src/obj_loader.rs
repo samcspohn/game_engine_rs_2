@@ -1,6 +1,9 @@
 use std::{
     path::Path,
-    sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
 };
 
 use parking_lot::Mutex;
@@ -14,7 +17,7 @@ use crate::{
 
 // static OBJ_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
 #[derive(Debug, Clone)]
-pub struct Obj {
+pub struct Model {
     // pub id: u32,
     pub meshes: Vec<Mesh>,
 }
@@ -34,7 +37,7 @@ pub struct Mesh {
     pub texture: Arc<Mutex<Option<AssetHandle<Texture>>>>,
 }
 
-impl Asset for Obj {
+impl Asset for Model {
     /// Load an OBJ file from the given path
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -210,7 +213,7 @@ impl Asset for Obj {
     // }
 }
 
-impl Obj {
+impl Model {
     pub fn default(gpu: &GPUManager) -> Self {
         let vertices = vec![[0.0, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, 0.5, 0.0]];
         let normals = vec![[0.0, 0.0, 1.0]; 3];

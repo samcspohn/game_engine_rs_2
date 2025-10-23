@@ -1,54 +1,65 @@
 #version 450
 
 struct Renderer {
-  uint t_idx; // index into model_matrices
-  uint m_id;  // index into model -> indirect command(s) offset + count
-  // material_id : uint;
+    uint t_idx; // index into model_matrices
+    uint m_id; // index into model -> indirect command(s) offset + count
+    // material_id : uint;
 };
 
 struct RendererInit {
-  uint idx;
-  Renderer r;
+    uint idx;
+    Renderer r;
+    uint padding;
 };
 
 struct VkDrawIndexedIndirectCommand {
-  int indexCount;
-  uint instanceCount;
-  uint firstIndex;
-  int vertexOffset;
-  uint firstInstance;
+    int indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstInstance;
 };
 
 struct ModelIndirect {
-  uint offset;
-  uint count;
+    uint offset;
+    uint count;
 };
-layout(set = 0, binding = 0) buffer ModelMatrices { mat4 model_matrices[]; };
-layout(set = 0, binding = 1) buffer MVP { mat4 mvp[]; };
-layout(set = 0, binding = 2) buffer Renderers { Renderer renderers[]; };
+layout(set = 0, binding = 0) buffer ModelMatrices {
+    mat4 model_matrices[];
+};
+layout(set = 0, binding = 1) buffer MVP {
+    mat4 mvp[];
+};
+layout(set = 0, binding = 2) buffer Renderers {
+    Renderer renderers[];
+};
 
-layout(set = 0, binding = 3) buffer RendererInits { RendererInit inits[]; };
-layout(set = 0, binding = 4) buffer RendererUninits { uint uninits[]; };
+layout(set = 0, binding = 3) buffer RendererInits {
+    RendererInit inits[];
+};
+layout(set = 0, binding = 4) buffer RendererUninits {
+    uint uninits[];
+};
 layout(set = 0, binding = 5) buffer ModelIndirects {
-  ModelIndirect model_indirect[]; // offset, count
+    ModelIndirect model_indirect[]; // offset, count
 };
 layout(set = 0, binding = 6, std430) restrict buffer WorkgroupSumsBuffer {
-  uint workgroupSums[];
+    uint workgroupSums[];
 };
 layout(set = 0, binding = 7) buffer IndirectCommands {
-  VkDrawIndexedIndirectCommand indirect[];
+    VkDrawIndexedIndirectCommand indirect[];
 };
 
 layout(set = 1, binding = 1) uniform camera {
-  mat4 view;
-  mat4 proj;
+    mat4 view;
+    mat4 proj;
 }
 cam;
 
 layout(set = 2, binding = 0) uniform Stage {
-  uint num_jobs;
-  uint stage;
-  uint pass;
+    uint num_jobs;
+    uint stage;
+    uint pass;
 };
 
 void pass0_localScan();
@@ -63,73 +74,97 @@ void pass2_addGlobal();
 
 layout(local_size_x = 64) in;
 void main() {
-  uint idx = gl_GlobalInvocationID.x;
-  if (idx >= num_jobs) {
-    return;
-  }
-  switch (stage) {
-  case 0: {
-    switch (pass) {
-    case 0: {
-      RendererInit u = inits[idx];
-      renderers[u.idx] = u.r;
-    } break;
-    case 1: {
-      uint u = uninits[idx];
-      renderers[u] = Renderer(-1, -1);
-    } break;
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= num_jobs) {
+        return;
     }
-  } break;
-  case 1: {
-    indirect[idx].instanceCount = 0;
-    indirect[idx].firstInstance = 0;
-  } break;
-  case 2: {
-    Renderer r = renderers[idx];
-    ModelIndirect mc = model_indirect[r.m_id];
-    for (uint i = 0; i < mc.count; ++i) {
-      // atomicAdd(indirect[mc.offset + i].instanceCount, 1); // no culling yet
-      atomicAdd(indirect[mc.offset + i].firstInstance, 1);
+    switch (stage) {
+        case 0:
+        {
+            switch (pass) {
+                case 0:
+                {
+                    RendererInit u = inits[idx];
+                    renderers[u.idx] = u.r;
+                }
+                break;
+                case 1:
+                {
+                    uint u = uninits[idx];
+                    renderers[u] = Renderer(-1, -1);
+                }
+                break;
+            }
+        }
+        break;
+        case 1:
+        {
+            indirect[idx].instanceCount = 0;
+            indirect[idx].firstInstance = 0;
+        }
+        break;
+        case 2:
+        {
+            Renderer r = renderers[idx];
+            ModelIndirect mc = model_indirect[r.m_id];
+            for (uint i = 0; i < mc.count; ++i) {
+                // atomicAdd(indirect[mc.offset + i].instanceCount, 1); // no culling yet
+                atomicAdd(indirect[mc.offset + i].firstInstance, 1);
+            }
+            // atomicAdd(indirect[r.m_id].firstInstance, 1);
+        }
+        break;
+        case 3:
+        {
+            switch (pass) {
+                case 0:
+                {
+                    // local scan within workgroup
+                    // see below for implementation
+                    pass0_localScan();
+                }
+                break;
+                case 1:
+                {
+                    // global scan of workgroup sums
+                    pass1_globalScan();
+                }
+                break;
+                case 2:
+                {
+                    // add global offsets to local results
+                    pass2_addGlobal();
+                }
+                break;
+            }
+        }
+        break;
+        case 4:
+        {
+            switch (pass) {
+                case 0:
+                {
+                    // reset instance counts to 0 for indirect draw
+                    indirect[idx].instanceCount = 0;
+                }
+                break;
+                case 1:
+                {
+                    // write indirect commands
+                    Renderer r = renderers[idx];
+                    mat4 model_matrix = model_matrices[r.t_idx];
+                    ModelIndirect mc = model_indirect[r.m_id];
+                    for (uint i = 0; i < mc.count; ++i) {
+                        uint mvp_idx = indirect[mc.offset + i].firstInstance +
+                                atomicAdd(indirect[mc.offset + i].instanceCount, 1);
+                        mvp[mvp_idx] = cam.proj * cam.view * model_matrix;
+                    }
+                }
+                break;
+            }
+        }
+        break;
     }
-    // atomicAdd(indirect[r.m_id].firstInstance, 1);
-  } break;
-  case 3: {
-    switch (pass) {
-    case 0: {
-      // local scan within workgroup
-      // see below for implementation
-      pass0_localScan();
-    } break;
-    case 1: {
-      // global scan of workgroup sums
-      pass1_globalScan();
-    } break;
-    case 2: {
-      // add global offsets to local results
-      pass2_addGlobal();
-    } break;
-    }
-  } break;
-  case 4: {
-    switch (pass) {
-    case 0: {
-      // reset instance counts to 0 for indirect draw
-      indirect[idx].instanceCount = 0;
-    } break;
-    case 1: {
-      // write indirect commands
-      Renderer r = renderers[idx];
-      mat4 model_matrix = model_matrices[r.t_idx];
-      ModelIndirect mc = model_indirect[r.m_id];
-      for (uint i = 0; i < mc.count; ++i) {
-        uint mvp_idx = indirect[mc.offset + i].firstInstance +
-                       atomicAdd(indirect[mc.offset + i].instanceCount, 1);
-        mvp[mvp_idx] = cam.proj * cam.view * model_matrix;
-      }
-    } break;
-    }
-  } break;
-  }
 }
 
 // Shared memory for local operations within workgroup
@@ -142,51 +177,51 @@ shared uint workgroupSum;
 
 // Up-sweep phase of scan (reduce phase)
 void upSweep() {
-  uint tid = gl_LocalInvocationID.x;
-  uint stride = 1;
+    uint tid = gl_LocalInvocationID.x;
+    uint stride = 1;
 
-  // Build sum tree
-  for (uint d = gl_WorkGroupSize.x >> 1; d > 0; d >>= 1) {
-    barrier();
-    if (tid < d) {
-      uint ai = stride * (2 * tid + 1) - 1;
-      uint bi = stride * (2 * tid + 2) - 1;
-      sharedData[bi] += sharedData[ai];
+    // Build sum tree
+    for (uint d = gl_WorkGroupSize.x >> 1; d > 0; d >>= 1) {
+        barrier();
+        if (tid < d) {
+            uint ai = stride * (2 * tid + 1) - 1;
+            uint bi = stride * (2 * tid + 2) - 1;
+            sharedData[bi] += sharedData[ai];
+        }
+        stride <<= 1;
     }
-    stride <<= 1;
-  }
 }
 
 // Down-sweep phase of scan
 void downSweep() {
-  uint tid = gl_LocalInvocationID.x;
-  uint stride = gl_WorkGroupSize.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint stride = gl_WorkGroupSize.x;
 
-  // Clear root and store workgroup sum
-  if (tid == 0) {
-    workgroupSum = sharedData[gl_WorkGroupSize.x - 1];
-    sharedData[gl_WorkGroupSize.x - 1] = 0;
-  }
-
-  // Traverse down tree building scan
-  for (uint d = 1; d < gl_WorkGroupSize.x; d <<= 1) {
-    stride >>= 1;
-    barrier();
-    if (tid < d) {
-      uint ai = stride * (2 * tid + 1) - 1;
-      uint bi = stride * (2 * tid + 2) - 1;
-
-      uint temp = sharedData[ai];
-      sharedData[ai] = sharedData[bi];
-      sharedData[bi] += temp;
+    // Clear root and store workgroup sum
+    if (tid == 0) {
+        workgroupSum = sharedData[gl_WorkGroupSize.x - 1];
+        sharedData[gl_WorkGroupSize.x - 1] = 0;
     }
-  }
+
+    // Traverse down tree building scan
+    for (uint d = 1; d < gl_WorkGroupSize.x; d <<= 1) {
+        stride >>= 1;
+        barrier();
+        if (tid < d) {
+            uint ai = stride * (2 * tid + 1) - 1;
+            uint bi = stride * (2 * tid + 2) - 1;
+
+            uint temp = sharedData[ai];
+            sharedData[ai] = sharedData[bi];
+            sharedData[bi] += temp;
+        }
+    }
 }
 
 // Perform local prefix sum within workgroup
 void localScan() {
-  upSweep();
-  downSweep();
+    upSweep();
+    downSweep();
 }
 
 // =============================================================================
@@ -195,93 +230,93 @@ void localScan() {
 
 // Pass 0: Local scan within each workgroup
 void pass0_localScan() {
-  uint globalId = gl_GlobalInvocationID.x;
-  uint localId = gl_LocalInvocationID.x;
-  uint workgroupId = gl_WorkGroupID.x;
+    uint globalId = gl_GlobalInvocationID.x;
+    uint localId = gl_LocalInvocationID.x;
+    uint workgroupId = gl_WorkGroupID.x;
 
-  // Load firstInstance data into shared memory
-  if (globalId < uint(num_jobs)) {
-    sharedData[localId] = indirect[globalId].firstInstance;
-  } else {
-    sharedData[localId] = 0; // Padding for out-of-bounds elements
-  }
+    // Load firstInstance data into shared memory
+    if (globalId < uint(num_jobs)) {
+        sharedData[localId] = indirect[globalId].firstInstance;
+    } else {
+        sharedData[localId] = 0; // Padding for out-of-bounds elements
+    }
 
-  barrier();
+    barrier();
 
-  // Perform local scan
-  localScan();
+    // Perform local scan
+    localScan();
 
-  barrier();
+    barrier();
 
-  // Write results back to firstInstance field
-  if (globalId < uint(num_jobs)) {
-    indirect[globalId].firstInstance = sharedData[localId];
-  }
+    // Write results back to firstInstance field
+    if (globalId < uint(num_jobs)) {
+        indirect[globalId].firstInstance = sharedData[localId];
+    }
 
-  // Store workgroup sum for next pass
-  if (localId == 0 && workgroupId < workgroupSums.length()) {
-    workgroupSums[workgroupId] = workgroupSum;
-  }
+    // Store workgroup sum for next pass
+    if (localId == 0 && workgroupId < workgroupSums.length()) {
+        workgroupSums[workgroupId] = workgroupSum;
+    }
 }
 
 // Pass 1: Global scan of workgroup sums
 void pass1_globalScan() {
-  uint localId = gl_LocalInvocationID.x;
-  uint workgroupId = gl_WorkGroupID.x;
-  // uint globalId = workgroupId * gl_WorkGroupSize.x + localId;
+    uint localId = gl_LocalInvocationID.x;
+    uint workgroupId = gl_WorkGroupID.x;
+    // uint globalId = workgroupId * gl_WorkGroupSize.x + localId;
 
-  // Calculate number of workgroups from previous pass
-  // uint workgroupCount = (uint(num_jobs) + gl_WorkGroupSize.x - 1) /
-  // gl_WorkGroupSize.x;
+    // Calculate number of workgroups from previous pass
+    // uint workgroupCount = (uint(num_jobs) + gl_WorkGroupSize.x - 1) /
+    // gl_WorkGroupSize.x;
 
-  uint localSum = 0;
-  float localSumSize =
-      float(workgroupSums.length()) / float(gl_WorkGroupSize.x);
-  // uint sum = 0;
-  uint startIndex = uint(localSumSize * float(localId));
-  uint endIndex = uint(localSumSize * float(localId + 1));
+    uint localSum = 0;
+    float localSumSize =
+        float(workgroupSums.length()) / float(gl_WorkGroupSize.x);
+    // uint sum = 0;
+    uint startIndex = uint(localSumSize * float(localId));
+    uint endIndex = uint(localSumSize * float(localId + 1));
 
-  localSum = workgroupSums[startIndex];
-  workgroupSums[startIndex] = 0; // Clear the first element for the scan
+    localSum = workgroupSums[startIndex];
+    workgroupSums[startIndex] = 0; // Clear the first element for the scan
 
-  for (uint i = startIndex + 1; i < endIndex && i < workgroupSums.length();
-       ++i) {
-    uint temp = workgroupSums[i];
-    workgroupSums[i] = localSum;
-    localSum += temp;
-  }
+    for (uint i = startIndex + 1; i < endIndex && i < workgroupSums.length();
+        ++i) {
+        uint temp = workgroupSums[i];
+        workgroupSums[i] = localSum;
+        localSum += temp;
+    }
 
-  // Load workgroup sums
-  // if (localId < workgroupCount && localId < workgroupSums.length()) {
-  sharedData[localId] = localSum;
-  // } else {
-  //     sharedData[localId] = 0;
-  // }
+    // Load workgroup sums
+    // if (localId < workgroupCount && localId < workgroupSums.length()) {
+    sharedData[localId] = localSum;
+    // } else {
+    //     sharedData[localId] = 0;
+    // }
 
-  barrier();
+    barrier();
 
-  // Perform scan on workgroup sums
-  localScan();
+    // Perform scan on workgroup sums
+    localScan();
 
-  barrier();
+    barrier();
 
-  // // Write scanned sums back
-  // if (localId < workgroupCount && localId < workgroupSums.length()) {
-  //     workgroupSums[localId] += sharedData[localId];
-  // }
-  for (uint i = startIndex; i < endIndex && i < workgroupSums.length(); ++i) {
-    workgroupSums[i] += sharedData[localId];
-  }
+    // // Write scanned sums back
+    // if (localId < workgroupCount && localId < workgroupSums.length()) {
+    //     workgroupSums[localId] += sharedData[localId];
+    // }
+    for (uint i = startIndex; i < endIndex && i < workgroupSums.length(); ++i) {
+        workgroupSums[i] += sharedData[localId];
+    }
 }
 
 // Pass 2: Add global offsets to local results
 void pass2_addGlobal() {
-  uint globalId = gl_GlobalInvocationID.x;
-  uint workgroupId = gl_WorkGroupID.x;
+    uint globalId = gl_GlobalInvocationID.x;
+    uint workgroupId = gl_WorkGroupID.x;
 
-  if (globalId < uint(num_jobs) && workgroupId > 0 &&
-      (workgroupId - 1) < workgroupSums.length()) {
-    // Add the accumulated sum from previous workgroups
-    indirect[globalId].firstInstance += workgroupSums[workgroupId - 1];
-  }
+    if (globalId < uint(num_jobs) && workgroupId > 0 &&
+            (workgroupId - 1) < workgroupSums.length()) {
+        // Add the accumulated sum from previous workgroups
+        indirect[globalId].firstInstance += workgroupSums[workgroupId - 1];
+    }
 }

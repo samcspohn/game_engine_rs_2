@@ -63,7 +63,7 @@ where
         }
         let buf = gpu
             .sub_alloc(self.usage)
-            .allocate_slice(self.data.len() as u64 - self.size as u64)
+            .allocate_slice((self.data.len() - self.size) as u64)
             .unwrap();
         {
             let mut write = buf.write().unwrap();

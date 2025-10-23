@@ -81,6 +81,9 @@ impl<'a> TransformGuard<'a> {
     pub fn get_children(&self) -> &mut Vec<u32> {
         self.hierarchy.get_children(&self)
     }
+    pub fn get_name(&self) -> String {
+        self.hierarchy.get_meta(&self).name.clone()
+    }
     // pub fn get_meta(&self) -> &mut TransformMeta {
     //     self.hierarchy.get_meta(&self)
     // }
@@ -100,7 +103,6 @@ impl<'a> TransformGuard<'a> {
     //     self.hierarchy.get_global_scale(&self)
     // }
 }
-
 #[repr(u8)]
 enum TransformComponent {
     Position = 1 << 0,
@@ -109,23 +111,42 @@ enum TransformComponent {
     Parent = 1 << 3,
 }
 
-impl From<u8> for TransformComponent {
-    fn from(value: u8) -> Self {
-        match value {
-            1 => TransformComponent::Position,
-            2 => TransformComponent::Rotation,
-            4 => TransformComponent::Scale,
-            8 => TransformComponent::Parent,
-            _ => panic!("Invalid value for TransformComponent"),
-        }
+// New: Flags type for combining components
+#[derive(Copy, Clone)]
+struct TransformComponentFlags(u8);
+
+impl TransformComponentFlags {
+    const NONE: Self = Self(0);
+    const ALL: Self = Self(0b1111);
+}
+
+impl From<TransformComponent> for TransformComponentFlags {
+    fn from(component: TransformComponent) -> Self {
+        Self(component as u8)
     }
 }
 
-impl BitOr for TransformComponent {
-    type Output = TransformComponent;
+impl BitOr<TransformComponent> for TransformComponent {
+    type Output = TransformComponentFlags;
+
+    fn bitor(self, rhs: TransformComponent) -> Self::Output {
+        TransformComponentFlags(self as u8 | rhs as u8)
+    }
+}
+
+impl BitOr<TransformComponent> for TransformComponentFlags {
+    type Output = TransformComponentFlags;
+
+    fn bitor(self, rhs: TransformComponent) -> Self::Output {
+        TransformComponentFlags(self.0 | rhs as u8)
+    }
+}
+
+impl BitOr for TransformComponentFlags {
+    type Output = TransformComponentFlags;
 
     fn bitor(self, rhs: Self) -> Self::Output {
-        (self as u8 | rhs as u8).into()
+        TransformComponentFlags(self.0 | rhs.0)
     }
 }
 
@@ -135,6 +156,18 @@ pub struct _Transform {
     pub scale: Vec3,
     pub name: String,
     pub parent: Option<u32>,
+}
+
+impl _Transform {
+    pub fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+            name: String::new(),
+            parent: None,
+        }
+    }
 }
 
 pub struct TransformHierarchy {
@@ -186,25 +219,24 @@ impl TransformHierarchy {
                 .get_mut()
                 .children
                 .push(idx as u32);
-            self.has_children[parent as usize >> 5]
-                .fetch_or(1 << (parent & 0b11111), Ordering::Relaxed);
+            self.has_children[parent as usize >> 5].fetch_or(1 << (parent & 31), Ordering::Relaxed);
         }
         if idx >> 1 >= self.dirty.len() {
             self.dirty.push(AtomicU8::new(0b1111)); // one u8 for every 2 transforms
         } else {
             self.dirty[idx >> 1].fetch_or(0b1111 << 4, Ordering::Relaxed);
         }
-        if idx >> 10 >= self.dirty_l2.len() {
-            self.dirty_l2.push(AtomicU32::new(0));
-        }
-        self.dirty_l2[idx >> 10].fetch_or(1 << ((idx >> 5) & 0b11111), Ordering::Relaxed);
+        // if idx >> 10 >= self.dirty_l2.len() {
+        //     self.dirty_l2.push(AtomicU32::new(0));
+        // }
+        // self.dirty_l2[idx >> 10].fetch_or(1 << ((idx >> 5) & 0b11111), Ordering::Relaxed);
         if idx >> 5 >= self.has_children.len() {
             self.has_children.push(AtomicU32::new(0));
         }
         if idx >> 5 >= self.active.len() {
             self.active.push(AtomicU32::new(0));
         }
-        self.active[idx >> 5].fetch_or(1 << (idx & 0b11111), Ordering::Relaxed);
+        self.active[idx >> 5].fetch_or(1 << (idx & 31), Ordering::Relaxed);
         // self.dirty.push(AtomicU8::new(0b1111));
 
         Transform::new(self, idx as u32)
@@ -254,18 +286,23 @@ impl TransformHierarchy {
         (self.has_children[idx as usize >> 5].load(Ordering::Relaxed) & mask) != 0
     }
     #[inline]
-    fn mark_dirty(&self, t: &TransformGuard, component: TransformComponent) {
-        let shift = (t.idx & 1) * 4; // Fixed: Added parentheses for correct precedence
-        let flag = (component as u8) << shift;
-        unsafe { self.dirty.get_unchecked(t.idx >> 1).fetch_or(flag, Ordering::Relaxed) };
-        // self.dirty_l2[t.idx >> 10].fetch_or(1 << ((t.idx >> 5) & 0b11111), Ordering::Relaxed);
+    fn mark_dirty(&self, t: &TransformGuard, component: impl Into<TransformComponentFlags>) {
+        let flags: TransformComponentFlags = component.into();
+        let shift = (t.idx & 1) * 4;
+        let flag = flags.0 << shift;
+        unsafe {
+            self.dirty
+                .get_unchecked(t.idx >> 1)
+                .fetch_or(flag, Ordering::Relaxed)
+        };
     }
 
     fn get_dirty(&self, idx: u32) -> u8 {
         let shift = (idx & 1) * 4; // Fixed: Added parentheses
         let mask = 0b1111 << shift;
         // Fixed: Use load to read without modifying; shift back to return only the 4 bits
-        (unsafe { self.dirty.get_unchecked((idx >> 1) as usize ) }).load(Ordering::Relaxed) & mask >> shift
+        ((unsafe { self.dirty.get_unchecked((idx >> 1) as usize) }).load(Ordering::Relaxed) & mask)
+            >> shift
     }
 
     fn get_dirty_l2(&self, chunk_id: usize) -> u32 {
@@ -275,9 +312,38 @@ impl TransformHierarchy {
     fn mark_clean(&self, idx: u32) {
         let shift = (idx & 1) * 4; // Fixed: Added parentheses
         let mask = !(0b1111 << shift); // Fixed: Use NOT of the mask to clear the bits
-        unsafe { self.dirty.get_unchecked((idx >> 1) as usize).fetch_and(mask, Ordering::Relaxed) };
+        unsafe {
+            self.dirty
+                .get_unchecked((idx >> 1) as usize)
+                .fetch_and(mask, Ordering::Relaxed)
+        };
     }
 
+    pub fn set_parent(&self, t: &TransformGuard, parent: Option<u32>) {
+        let old_parent = self.get_parent(t);
+        let t_idx = t.idx as u32;
+        if let Some(old_parent) = old_parent {
+            // drop(t);
+            let children = self.get_children(&self._lock_internal(old_parent));
+            if let Some(pos) = children.iter().position(|&x| x == t_idx) {
+                children.swap_remove(pos);
+            }
+            if children.is_empty() {
+                self.has_children[old_parent as usize >> 5]
+                    .fetch_and(!(1 << (old_parent & 0b11111)), Ordering::Relaxed);
+            }
+        }
+        if let Some(new_parent) = parent {
+            self.get_meta(t).parent = new_parent;
+            self.get_children(&self._lock_internal(new_parent))
+                .push(t_idx);
+            self.has_children[new_parent as usize >> 5]
+                .fetch_or(1 << (new_parent & 0b11111), Ordering::Relaxed);
+        } else {
+            self.get_meta(t).parent = u32::MAX;
+        }
+        self.mark_dirty(t, TransformComponent::Parent);
+    }
     fn _lock_internal<'a>(&'a self, idx: u32) -> TransformGuard<'a> {
         let lock = self.mutexes[idx as usize].lock();
         TransformGuard {
@@ -304,19 +370,22 @@ impl TransformHierarchy {
         let s = self._scale(t.idx as u32);
         *s = scale;
         if self.get_has_children(t.idx as u32) {
-            self.scale_children(t, scale);
+            let base_pos = self._position(t.idx as u32);
+            self.scale_children(t, scale, base_pos);
         }
         self.mark_dirty(t, TransformComponent::Scale);
     }
-    fn scale_children(&self, t: &TransformGuard, scale: Vec3) {
+    pub(crate) fn scale_children(&self, t: &TransformGuard, scale: Vec3, base_pos: &Vec3) {
         let children = self.get_children(t);
         for child in children {
             let child = self._lock_internal(*child);
             let s = self._scale(child.idx as u32);
+            let p = self._position(child.idx as u32);
             *s *= scale;
+            *p = base_pos + (*p - base_pos) * scale;
             self.mark_dirty(&child, TransformComponent::Scale);
             if self.get_has_children(child.idx as u32) {
-                self.scale_children(&child, scale);
+                self.scale_children(&child, scale, base_pos);
             }
         }
     }
@@ -338,7 +407,7 @@ impl TransformHierarchy {
             self.translate_children(t, translation);
         }
     }
-    fn translate_children(&self, t: &TransformGuard, translation: Vec3) {
+    pub(crate) fn translate_children(&self, t: &TransformGuard, translation: Vec3) {
         let children = self.get_children(t);
         for child in children {
             let child = self._lock_internal(*child);
@@ -367,7 +436,7 @@ impl TransformHierarchy {
             self.rotate_children(t, rotation, *self._position(t.idx as u32));
         }
     }
-    fn rotate_children(&self, t: &TransformGuard, rotation: Quat, position: Vec3) {
+    pub(crate) fn rotate_children(&self, t: &TransformGuard, rotation: Quat, position: Vec3) {
         let children = self.get_children(t);
         for child in children {
             let child = self._lock_internal(*child);
@@ -393,15 +462,26 @@ impl TransformHierarchy {
         *r = rotation;
         self.mark_dirty(t, TransformComponent::Rotation);
     }
-    pub fn get_transform(&self, idx: u32) -> Option<Transform<'_>> {
-        if (idx as usize) < self.mutexes.len() {
-            if self.get_active(idx) {
-                Some(Transform::new(self, idx))
-            } else {
-                None
-            }
-        } else {
-            None
+    pub fn get_transform(&self, idx: u32) -> Transform<'_> {
+        // if (idx as usize) < self.mutexes.len() {
+        //     if self.get_active(idx) {
+        //         Some(Transform::new(self, idx))
+        //     } else {
+        //         None
+        //     }
+        // } else {
+        //     None
+        // }
+        Transform::new(self, idx)
+    }
+    pub fn get_transform_(&self, idx: u32) -> _Transform {
+        let guard = self._lock_internal(idx);
+        _Transform {
+            position: self.get_position(&guard),
+            rotation: self.get_rotation(&guard),
+            scale: self.get_scale(&guard),
+            name: self.get_meta(&guard).name.clone(),
+            parent: self.get_parent(&guard),
         }
     }
     fn get_position(&self, t: &TransformGuard) -> Vec3 {

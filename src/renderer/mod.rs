@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     ops::Sub,
-    sync::{Arc, atomic::AtomicU32},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32},
+    },
 };
 
 use egui::layers;
@@ -22,8 +25,10 @@ use vulkano::{
 
 use crate::{
     asset_manager::{Asset, AssetHandle, AssetManager},
+    component::Component,
+    engine::Engine,
     gpu_manager::{GPUManager, gpu_vec::GpuVec},
-    obj_loader::Obj,
+    obj_loader::Model,
     renderer,
     transform::Transform,
     util::Storage,
@@ -49,7 +54,7 @@ pub struct RenderingSystem {
     pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
     // buffers
     indirect_commands_buffer: GpuVec<DrawIndexedIndirectCommand>,
-    renderer_buffer: GpuVec<Renderer>,
+    renderer_buffer: GpuVec<cs::Renderer>,
     renderer_inits_buffer: GpuVec<cs::RendererInit>,
     renderer_uninits_buffer: GpuVec<u32>,
     model_indirect_buffer: GpuVec<cs::ModelIndirect>, // [indirect_offset, count]
@@ -60,15 +65,43 @@ pub struct RenderingSystem {
     // data
     // model_indirect_buffer_len: usize,
     model_map: HashMap<u32, u32>, // model_id -> intermediate idx
-    indirect_map: HashMap<u32, u32>, // intermediate -> model_indirect_buffer idx
-    intermediate_counter: AtomicU32,
+    // indirect_map: HashMap<u32, u32>, // intermediate -> model_indirect_buffer idx
+    // indirect_counts: HashMap<u32, u32>,
+    // model_counts: HashMap<u32, u32>,
+    indirect_model_map: HashMap<u32, u32>,
+    // intermediate_counter: AtomicU32,
     renderer_storage: Storage<Renderer>,
+    mvp_count: AtomicU32,
+    model_registered: AtomicBool,
     // model_indirects: Vec<cs::ModelIndirect>,
 }
 
+#[derive(Default, Clone)]
 pub struct RendererComponent {
-    model: AssetHandle<Obj>,
+    pub model: AssetHandle<Model>,
     r_idx: u32,
+}
+
+impl RendererComponent {
+    pub fn new(model: AssetHandle<Model>) -> Self {
+        Self { model, r_idx: 0 }
+    }
+}
+
+impl Component for RendererComponent {
+    fn init(&mut self, t: &Transform, e: &Engine) {
+        self.r_idx = e.rendering_system.lock().renderer(self.model.clone(), t);
+    }
+    fn deinit(&mut self, t: &Transform, e: &Engine) {
+        e.rendering_system
+            .lock()
+            .renderer_storage
+            .remove(self.r_idx);
+        e.rendering_system
+            .lock()
+            .renderer_uninits_buffer
+            .push_data(self.r_idx);
+    }
 }
 
 impl RendererComponent {
@@ -79,6 +112,35 @@ impl RendererComponent {
         id
     }
 }
+
+#[derive(Default, Clone)]
+pub struct _RendererComponent {
+    pub model: AssetHandle<Model>,
+}
+
+impl _RendererComponent {
+    pub fn new(model: AssetHandle<Model>) -> Self {
+        Self { model }
+    }
+}
+
+impl Component for _RendererComponent {
+    fn init(&mut self, t: &Transform, e: &Engine) {
+        e.rendering_system.lock()._renderer(self.model.clone());
+        // self.r_idx = e.rendering_system.lock().renderer(self.model.clone(), t);
+    }
+    fn deinit(&mut self, t: &Transform, e: &Engine) {
+        // e.rendering_system
+        //     .lock()
+        //     .renderer_storage
+        //     .remove(self.r_idx);
+        // e.rendering_system
+        //     .lock()
+        //     .renderer_uninits_buffer
+        //     .push_data(self.r_idx);
+    }
+}
+
 const NUM_STAGES: u64 = 9;
 impl RenderingSystem {
     pub fn new(gpu: Arc<GPUManager>) -> Self {
@@ -127,35 +189,79 @@ impl RenderingSystem {
             ),
             gpu,
             model_map: HashMap::new(),
-            indirect_map: HashMap::new(),
-            intermediate_counter: AtomicU32::new(0),
+            // indirect_map: HashMap::new(),
+            // intermediate_counter: AtomicU32::new(0),
             renderer_storage: Storage::new(),
+            mvp_count: AtomicU32::new(0),
+            // indirect_counts: HashMap::new(),
+            // model_counts: HashMap::new(),
+            indirect_model_map: HashMap::new(),
+            model_registered: AtomicBool::new(false),
         }
     }
-    pub fn register_model_handle(&mut self, model: AssetHandle<Obj>) {
+    pub fn get_or_register_model_handle(&mut self, model: AssetHandle<Model>) -> u32 {
         let m_id = model.asset_id;
         if !self.model_map.contains_key(&m_id) {
-            let idx = self.intermediate_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.indirect_map.insert(idx, 0); // placeholder
-            self.model_map.insert(m_id, idx); // placeholder
+            // let interm_idx = self
+            //     .intermediate_counter
+            //     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let idx = self.model_indirect_buffer.data_len() as u32;
+            self.model_indirect_buffer.push_data(cs::ModelIndirect {
+                offset: 0,
+                count: 1,
+            }); // render placeholder mesh
+            // self.indirect_map.insert(interm_idx, idx);
+            self.model_map.insert(m_id, idx);
+            // initialize counts
+            // self.model_counts.insert(m_id, 0);
+            // self.indirect_counts.insert(interm_idx, 0);
+            self.indirect_model_map.insert(idx, m_id);
         }
+        *self.model_map.get(&m_id).unwrap()
     }
-    pub fn register_model(&mut self, model: AssetHandle<Obj>, asset: Arc<Obj>) {
+    pub fn register_model(&mut self, model: AssetHandle<Model>, asset: Arc<Model>) {
         let m_id = model.asset_id;
         // let m_idx = model.get(assets).id;
         // let t_idx = transform.get_idx();
 
-        let intermediate_idx = *self.model_map.get(&m_id).expect("Model not pre-registered");
-        let model_indirect_buffer_idx = self.model_indirect_buffer.data_len() as u32;
-        self.indirect_map.insert(intermediate_idx, model_indirect_buffer_idx);
+        let ind_idx = *self.model_map.get(&m_id).expect("Model not pre-registered");
+        let mesh_count = asset.meshes.len() as u32;
+        // let model_indirect_buffer_idx = self.model_indirect_buffer.data_len() as u32;
+        // if let Some(prev) = self
+        //     .indirect_map
+        //     .insert(intermediate_idx, model_indirect_buffer_idx)
+        // {
+        //     // get previously created renderers count, subtract from placeholder
+        //     // and increment the new model indirect count by the number of meshes * previous count
+        //     let model_idx = *self
+        //         .indirect_model_map
+        //         .get(&intermediate_idx)
+        //         .expect("Intermediate idx not found in indirect_model_map");
+        //     let count = *self
+        //         .model_counts
+        //         .get(&model_idx)
+        //         .expect("Model idx not found in model_counts");
+        //     self.indirect_counts.get_mut(&prev).map(|c| *c -= count);
+        //     self.indirect_counts
+        //         .entry(model_indirect_buffer_idx)
+        //         .and_modify(|c| *c += mesh_count * count)
+        //         .or_insert(mesh_count * count);
+        //     self.mvp_count
+        //         .fetch_sub(count, std::sync::atomic::Ordering::SeqCst);
+        //     self.mvp_count
+        //         .fetch_add(mesh_count * count, std::sync::atomic::Ordering::SeqCst);
+        // }
+        // let ind_idx = *self.indirect_map.get(&intermediate_idx).unwrap();
 
         let indirect_offset = self.indirect_commands_buffer.data_len() as u32;
-        let count = asset.meshes.len() as u32;
         // self.model_map.insert(m_id, a as u32);
-        self.model_indirect_buffer.push_data(cs::ModelIndirect {
+        *self
+            .model_indirect_buffer
+            .get_data_mut(ind_idx as usize)
+            .unwrap() = cs::ModelIndirect {
             offset: indirect_offset,
-            count,
-        });
+            count: mesh_count,
+        };
         for mesh in &asset.meshes {
             self.indirect_commands_buffer
                 .push_data(DrawIndexedIndirectCommand {
@@ -166,61 +272,90 @@ impl RenderingSystem {
                     first_instance: 0,
                 });
         }
+        self.model_registered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.command_buffer = None; // invalidate command buffer
     }
-    pub fn renderer(
-        &mut self,
-        model: AssetHandle<Obj>,
-        transform: &Transform,
-        assets: &AssetManager,
-    ) -> RendererComponent {
-        let asset_id = model.asset_id;
-        let m_id = *self.model_map.get(&asset_id).expect("Model not registered");
+    // pub fn update_num_counts(&mut self, model: AssetHandle<Model>) {
+    //     let asset_id = model.asset_id;
+    //     let interm_id = self.get_or_register_model_handle(model);
+    //     let ind_id = *self.indirect_map.get(&interm_id).unwrap();
+    //     let count = self
+    //         .model_indirect_buffer
+    //         .get_data(interm_id as usize)
+    //         .map_or(1, |mi| mi.count);
+    //     self.mvp_count
+    //         .fetch_add(count, std::sync::atomic::Ordering::SeqCst);
+    //     // self.indirect_counts
+    //     //     .entry(ind_id)
+    //     //     .and_modify(|c| *c += count)
+    //     //     .or_insert(count);
+    //     // self.model_counts
+    //     //     .entry(asset_id)
+    //     //     .and_modify(|c| *c += 1)
+    //     //     .or_insert(1);
+    // }
+    pub fn renderer(&mut self, model: AssetHandle<Model>, transform: &Transform) -> u32 {
+        let m_id = self.get_or_register_model_handle(model.clone());
+        // self.update_num_counts(model);
         let t_idx = transform.get_idx();
         let renderer = Renderer { m_id, t_idx };
         let r_idx = self.renderer_storage.insert(renderer);
         self.renderer_inits_buffer.push_data(cs::RendererInit {
             idx: r_idx,
             r: cs::Renderer { t_idx, m_id },
+            padding: 0,
         });
-        RendererComponent { model, r_idx }
+        r_idx
+    }
+    pub fn _renderer(&mut self, model: AssetHandle<Model>) {
+        self.get_or_register_model_handle(model);
     }
     pub fn compute_renderers(
         &mut self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         model_matrices: &Subbuffer<[[[f32; 4]; 4]]>,
-        assets_loaded: bool, // cam: &Subbuffer<crate::vs::camera>,
+        // assets_loaded: bool, // cam: &Subbuffer<crate::vs::camera>,
     ) -> bool {
         let mut ret = false;
         let num_workgroups = self.indirect_commands_buffer.data_len().div_ceil(64).max(1) as u32;
         ret |=
             self.workgroup_sums_buffer
                 .resize_buffer(num_workgroups as usize, &self.gpu, builder);
+
         ret |= self.model_indirect_buffer.upload_delta(&self.gpu, builder);
-        if assets_loaded {
+
+        if self
+            .model_registered
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             ret |= self.model_indirect_buffer.force_update(&self.gpu, builder);
+            self.model_registered
+                .store(false, std::sync::atomic::Ordering::SeqCst);
         }
 
         ret |= self
             .renderer_buffer
             .resize_buffer(self.renderer_storage.len(), &self.gpu, builder);
-        ret |= self
-            .mvp_buffer
-            .resize_buffer(self.renderer_storage.len(), &self.gpu, builder);
+
+        ret |= self.mvp_buffer.resize_buffer(1 << 21, &self.gpu, builder);
+        // println!("Renderer System: {} MVPs", self.mvp_count.load(std::sync::atomic::Ordering::SeqCst));
 
         let renderer_inits_len = self.renderer_inits_buffer.data_len();
         let renderer_uninits_len = self.renderer_uninits_buffer.data_len();
-        self.renderer_inits_buffer.upload_delta(&self.gpu, builder);
-        self.renderer_uninits_buffer
+        let mut resized = self.renderer_inits_buffer.upload_delta(&self.gpu, builder);
+        resized |= self
+            .renderer_uninits_buffer
             .upload_delta(&self.gpu, builder);
         self.renderer_inits_buffer.clear();
         self.renderer_uninits_buffer.clear();
 
         ret |= self.indirect_commands_buffer.data_len() != self.indirect_commands_buffer.buf_len();
-        ret |= self.indirect_commands_buffer
+        ret |= self
+            .indirect_commands_buffer
             .upload_delta(&self.gpu, builder);
 
-        if self.command_buffer.is_none() || ret {
+        if self.command_buffer.is_none() || ret || resized {
             let mut builder = self
                 .gpu
                 .create_command_buffer(CommandBufferUsage::SimultaneousUse);
@@ -404,9 +539,12 @@ impl RenderingSystem {
         assets: &AssetManager,
         pipeline: Arc<GraphicsPipeline>,
     ) {
-        for (model_id, model_idx) in &self.model_map {
-            let indirect_idx = *self.indirect_map.get(model_idx).unwrap();
-            let obj = AssetHandle::<Obj>::_from_id(*model_id);
+        for (model_asset_id, ind_idx) in &self.model_map {
+            // let indirect_idx = *self.indirect_map.get(ind_idx).unwrap();
+            let obj = AssetHandle::<Model>::_from_id(*model_asset_id);
+            // if indirect_idx != *ind_idx && indirect_idx != 0 {
+            //     panic!("index out of order")
+            // }
             let model = obj.get(assets);
             for (i, mesh) in model.meshes.iter().enumerate() {
                 let texture = mesh
@@ -430,7 +568,7 @@ impl RenderingSystem {
 
                 let offset = self
                     .model_indirect_buffer
-                    .get_data(indirect_idx as usize)
+                    .get_data(*ind_idx as usize)
                     .unwrap()
                     .offset
                     + i as u32;

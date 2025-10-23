@@ -1,2 +1,8 @@
 copying buffers to staging is more efficient when objects are moving
 more efficient to rebuild command buffers when objects are static
+fixed buffer copying and command buffer rebuilding strategies
+don't rebuild command buffers, use cyclic buffers with random read access
+//////////////////////////////////////////////////////////////////////////////////
+Using Vec with get_unchecked 20% faster than segvec[]
+//////////////////////////////////////////////////////////////////////////////////
+container with vec per thread 90% slower with vec transforms (transforms must also be per thread)

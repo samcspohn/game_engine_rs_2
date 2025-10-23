@@ -51,13 +51,15 @@ impl<T> SubContainer<T> {
 }
 
 pub struct Container<T> {
-    pub data: Vec<SubContainer<T>>,
-    pub ordered_by_active: Vec<usize>,
-    pub num_items: usize,
+    data: Vec<SubContainer<T>>,
+    ordered_by_active: Vec<usize>,
+    num_items: usize,
 }
 
-impl<T> Container<T> 
-where T : Send + Sync{
+impl<T> Container<T>
+where
+    T: Send + Sync,
+{
     pub fn new(num_threads: usize) -> Self {
         Self {
             data: (0..num_threads).map(|_| SubContainer::new()).collect(),

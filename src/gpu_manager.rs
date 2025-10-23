@@ -1,10 +1,8 @@
 use std::{
-    collections::HashMap,
-    ops::Sub,
-    sync::{
+    cell::SyncUnsafeCell, collections::HashMap, ops::Sub, sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-    },
+    }
 };
 
 use force_send_sync::SendSync;
@@ -42,7 +40,7 @@ trait GPUWorkItemBase {
 }
 
 pub struct GPUWorkItem<T> {
-    pub work: Box<dyn Fn(&GPUManager) -> T + Send + Sync>,
+    pub work: SyncUnsafeCell<Option<Box<dyn FnOnce(&GPUManager) -> T + Send + Sync>>>,
     pub completed: AtomicBool,
     pub result: Mutex<Option<T>>,
 }
@@ -52,7 +50,7 @@ impl<T> GPUWorkItemBase for GPUWorkItem<T> {
         self.completed.load(Ordering::SeqCst)
     }
     fn call(&self, gpu: &GPUManager) {
-        self.call(gpu);
+        self._call(gpu);
     }
 }
 impl<T> GPUWorkItem<T> {
@@ -63,15 +61,15 @@ impl<T> GPUWorkItem<T> {
         self.result.lock().take()
     }
 
-    pub fn call(&self, gpu: &GPUManager) {
-        let result = self.work.as_ref()(gpu);
+    pub fn _call(&self, gpu: &GPUManager) {
+        let result = unsafe { &mut *self.work.get() }.take().unwrap()(gpu);
         *self.result.lock() = Some(result);
         self.completed.store(true, Ordering::SeqCst);
     }
 }
 
 pub struct GPUWorkQueue {
-    pub work_queue: Arc<Mutex<Vec<Arc<dyn GPUWorkItemBase + Send + Sync>>>>,
+    work_queue: Arc<Mutex<Vec<Arc<dyn GPUWorkItemBase + Send + Sync>>>>,
 }
 impl GPUWorkQueue {
     pub fn new() -> Self {
@@ -82,11 +80,11 @@ impl GPUWorkQueue {
 
     pub fn enqueue_work<F, T>(&self, work: F) -> Arc<GPUWorkItem<T>>
     where
-        F: Fn(&GPUManager) -> T + Send + Sync + 'static,
+        F: FnOnce(&GPUManager) -> T + Send + Sync + 'static,
         T: Send + 'static,
     {
         let item = Arc::new(GPUWorkItem {
-            work: Box::new(work),
+            work: SyncUnsafeCell::new(Some(Box::new(work))),
             completed: AtomicBool::new(false),
             result: Mutex::new(None),
         });

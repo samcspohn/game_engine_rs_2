@@ -13,16 +13,18 @@
 // original triangle example.
 #![feature(sync_unsafe_cell)]
 #![feature(portable_simd)]
-
+#[allow(static_mut_refs)]
 use camera::Camera;
 use glam::Vec3;
+use gltf::json::extensions::asset;
 use gpu_manager::GPUManager;
-use obj_loader::Obj;
+use obj_loader::Model;
 use parking_lot::Mutex;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use render_context::RenderContext;
 use std::{
     any::TypeId,
+    cell::SyncUnsafeCell,
     collections::HashMap,
     env,
     error::Error,
@@ -51,11 +53,20 @@ use winit::{
 
 use crate::{
     asset_manager::{Asset, AssetHandle},
-    transform::{_Transform, Transform, compute::PerfCounter}, util::container::Container,
+    component::{Component, ComponentStorage, Scene},
+    engine::Engine,
+    renderer::{_RendererComponent, RendererComponent, RenderingSystem},
+    transform::{_Transform, Transform, compute::PerfCounter},
+    util::container::Container,
 };
+
+use rayon::prelude::*;
 
 mod asset_manager;
 mod camera;
+mod component;
+mod engine;
+mod gltf_loader;
 mod gpu_manager;
 mod input;
 mod obj_loader;
@@ -64,7 +75,6 @@ mod renderer;
 mod texture;
 mod transform;
 mod util;
-
 fn main() -> Result<(), impl Error> {
     unsafe {
         env::set_var("RUST_BACKTRACE", "1");
@@ -117,32 +127,40 @@ impl FPS {
 }
 
 static mut TRANSLATION: Vec3 = Vec3::ZERO;
+
+#[derive(Default, Clone)]
 struct ComponentTest {}
 impl ComponentTest {
     fn new() -> Self {
         Self {}
     }
+}
+impl Component for ComponentTest {
     fn update(&mut self, dt: f32, t: &Transform) {
         let t = t.lock();
-        t.translate_by(unsafe { TRANSLATION } * dt);
+        t.translate_by(unsafe { TRANSLATION });
     }
 }
 
 struct App {
     gpu: Arc<GPUManager>,
     asset_manager: asset_manager::AssetManager,
-    cube: Option<asset_manager::AssetHandle<obj_loader::Obj>>,
+    // cube: Option<asset_manager::AssetHandle<obj_loader::Model>>,
     // offsets: Vec<[f32; 3]>,
     rcxs: HashMap<WindowId, RenderContext>,
     cursor_grabbed: bool,
     fps: FPS,
     time: std::time::Instant,
     camera: HashMap<WindowId, Arc<Mutex<camera::Camera>>>,
-    transform_hierarchy: Arc<Mutex<TransformHierarchy>>,
+    // transform_hierarchy: Arc<Mutex<TransformHierarchy>>,
     transform_compute: TransformCompute,
-    rendering_system: Arc<Mutex<renderer::RenderingSystem>>,
-    renderers: Vec<renderer::RendererComponent>,
-    component_test: Arc<Mutex<Container<(u32, ComponentTest)>>>,
+    // renderers: Vec<renderer::RendererComponent>,
+    // engine: engine::Engine,
+    world: Arc<Mutex<Scene>>,
+    engine: Arc<Engine>,
+    rendering_system: Arc<Mutex<RenderingSystem>>,
+    // component_test: Arc<Mutex<Container<(u32, ComponentTest)>>>,
+    // component_test2: Arc<Mutex<Vec<SyncUnsafeCell<ComponentTest>>>>,
     // update_transforms: bool,
     transforms_updated: bool,
     // builder: Option<AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>>,
@@ -155,6 +173,7 @@ struct App {
     sim_thread: std::thread::JoinHandle<()>,
     sim_frame_start: std::sync::mpsc::SyncSender<f32>,
     sim_frame_end: std::sync::mpsc::Receiver<()>,
+    bismarck_handle: Option<asset_manager::AssetHandle<Scene>>,
 }
 
 impl App {
@@ -189,199 +208,188 @@ impl App {
         // )
         // .unwrap();
         // let cube = obj_loader::Obj::load_from_file("assets/cube/cube.obj", &gpu.lock()).unwrap();
-        let mut asset_manager = asset_manager::AssetManager::new(gpu.clone());
-        let default_obj = asset_manager.set_placeholder_asset(Obj::default(&gpu));
+        let engine = Arc::new(Engine::new(gpu.clone()));
+
+        let rendering_system = engine.rendering_system.clone();
+        let mut asset_manager =
+            asset_manager::AssetManager::new(gpu.clone(), rendering_system.clone());
+        let default_obj = asset_manager.set_placeholder_asset(Model::default(&gpu));
         asset_manager.set_placeholder_asset(texture::Texture::default(&gpu));
 
         let transform_compute = TransformCompute::new(&gpu);
-        let mut transform_hierarchy = TransformHierarchy::new();
-        let rendering_system = Arc::new(Mutex::new(renderer::RenderingSystem::new(gpu.clone())));
-        rendering_system
-            .lock()
-            .register_model_handle(AssetHandle::<Obj>::_from_id(0));
-        rendering_system
-            .lock()
-            .register_model(AssetHandle::<Obj>::_from_id(0), default_obj.clone());
+        // let mut transform_hierarchy = TransformHierarchy::new();
+        // let rendering_system = Arc::new(Mutex::new(renderer::RenderingSystem::new(gpu.clone())));
+        // rendering_system
+        //     .lock()
+        //     .register_model_handle(AssetHandle::<Obj>::_from_id(0));
+        // rendering_system
+        //     .lock()
+        //     .register_model(AssetHandle::<Obj>::_from_id(0), default_obj.clone());
 
-        let _r = rendering_system.clone();
-        let cube = asset_manager.load_asset::<Obj>(
-            "assets/cube/cube.obj",
-            Some(Box::new(move |handle, arc_asset| {
-                let mut __r = _r.lock();
-                __r.register_model(handle, arc_asset);
-            })),
-        );
-        rendering_system.lock().register_model_handle(cube.clone());
+        // let _r = rendering_system.clone();
 
-        // let mut previous_frame_end = Some(sync::now(gpu.device.clone()).boxed());
+        // rendering_system.lock().register_model_handle(cube.clone());
+        // let mut renderers = Vec::new();
+
+        // let component_registry = Arc::new(Mutex::new(component::ComponentRegistry::new()));
+        // component_registry.lock().register::<ComponentTest>();
+        // component_registry.lock().register::<RendererComponent>();
+
+        unsafe {
+            gltf_loader::ENGINE = Some(engine.clone());
+        }
+        let mut world = Scene::new(engine.clone());
+        let world = Arc::new(Mutex::new(world));
+
+        let _world = world.clone();
+        let empty_scene = Scene::new(engine.clone());
+        let scene_placeholder = asset_manager.set_placeholder_asset(empty_scene);
 
         // while Arc::ptr_eq(
-        //     &(cube.get(&asset_manager) as Arc<dyn Asset>),
-        //     asset_manager
-        //         .placeholder_assets
-        //         .lock()
-        //         .get(&TypeId::of::<Obj>())
-        //         .unwrap(),
+        //     &a.get(&asset_manager),
+        //     &scene_placeholder,
         // ) {
-        //     // wait until the cube is loaded
         //     asset_manager.process_deferred_queue();
         //     gpu.process_work_queue();
-        //     previous_frame_end.as_mut().unwrap().cleanup_finished();
+        //     // std::thread::sleep(std::time::Duration::from_millis(10));
         // }
-        // rendering_system.register_model(cube.clone(), &asset_manager);
-        let mut renderers = Vec::new();
-        let component_test = Arc::new(Mutex::new(Container::new(
-            rayon::current_num_threads(),
-        )));
+        let mut bismarck_handle = None;
+        {
+            let mut world = world.lock();
+            world.components.register::<ComponentTest>(true);
+            world.components.register::<RendererComponent>(false);
+            world.components.register::<_RendererComponent>(false);
 
-        let mut _component_test = component_test.lock();
+            world
+                .engine
+                .rendering_system
+                .lock()
+                .get_or_register_model_handle(AssetHandle::<Model>::_from_id(0));
+            world
+                .engine
+                .rendering_system
+                .lock()
+                .register_model(AssetHandle::<Model>::_from_id(0), default_obj.clone());
+            let _r = world.engine.rendering_system.clone();
+            let cube = asset_manager.load_asset::<Model>("assets/cube/cube.obj", None);
+            world
+                .engine
+                .rendering_system
+                .lock()
+                .get_or_register_model_handle(cube.clone());
 
-        let dims = (NUM_CUBES as f64).powf(1.0 / 3.0).ceil() as u32;
-        let mut _rendering_system = rendering_system.lock();
-        for i in 0..NUM_CUBES {
-            let x = (i as u32 % dims) as f32;
-            let y = ((i as u32 / dims) % dims) as f32;
-            let z = (i as u32 / (dims * dims)) as f32;
-            let spacing = 10.0;
-            let t = _Transform {
-                position: Vec3::new(
-                    (x - dims as f32 / 2.0) * spacing,
-                    (y - dims as f32 / 2.0) * spacing,
-                    (z - dims as f32 / 2.0) * spacing,
-                ),
-                rotation: glam::Quat::from_axis_angle(
-                    Vec3::new(
-                        rand::random::<f32>(),
-                        rand::random::<f32>(),
-                        rand::random::<f32>(),
-                    )
-                    .normalize(),
-                    rand::random::<f32>() * std::f32::consts::TAU,
-                ),
-                scale: Vec3::splat(0.5),
-                name: format!("cube_{i}"),
-                parent: None,
-            };
-            let transform = transform_hierarchy.create_transform(t);
-            _component_test.insert((
-                transform.get_idx() as u32,
-                ComponentTest::new(),
-            ));
-            let r = _rendering_system.renderer(cube.clone(), &transform, &mut asset_manager);
-            renderers.push(r);
+            let a = asset_manager.load_asset::<Scene>(
+                "assets/bismark_low_poly2.glb",
+                Some(Box::new(move |handle, arc_asset| {
+                    _world.lock().instantiate(&arc_asset);
+                })),
+            );
+            bismarck_handle = Some(a);
+            // let mut _component_registry = component_registry.lock();
+
+            let dims = (NUM_CUBES as f64).powf(1.0 / 3.0).ceil() as u32;
+            // let mut _rendering_system = rendering_system.lock();
+            // let num_cubes_per_thread =
+            //     (NUM_CUBES as f32 / rayon::current_num_threads() as f32).ceil() as usize;
+            // let mut current_thread_idx = 0;
+            for i in 0..NUM_CUBES {
+                let x = (i as u32 % dims) as f32;
+                let y = ((i as u32 / dims) % dims) as f32;
+                let z = (i as u32 / (dims * dims)) as f32;
+                let spacing = 10.0;
+                let t = _Transform {
+                    position: Vec3::new(
+                        (x - dims as f32 / 2.0) * spacing,
+                        (y - dims as f32 / 2.0) * spacing,
+                        (z - dims as f32 / 2.0) * spacing,
+                    ),
+                    rotation: glam::Quat::from_axis_angle(
+                        Vec3::new(
+                            rand::random::<f32>(),
+                            rand::random::<f32>(),
+                            rand::random::<f32>(),
+                        )
+                        .normalize(),
+                        rand::random::<f32>() * std::f32::consts::TAU,
+                    ),
+                    scale: Vec3::splat(0.5),
+                    name: format!("cube_{i}"),
+                    parent: None,
+                };
+                let e = world.new_entity(t);
+                world.add_component(e, ComponentTest::new());
+                world.add_component(e, RendererComponent::new(cube.clone()));
+                // let transform = transform_hierarchy.create_transform(t);
+                // _component_registry.get_storage_mut::<ComponentTest>().map(|storage| {
+                //     storage.set(
+                //         ComponentTest::new(),
+                //         transform.get_idx(),
+                //     );
+                // });
+
+                // let r = _rendering_system.renderer(cube.clone(), &transform, &mut asset_manager);
+                // renderers.push(r);
+            }
+            // drop(_rendering_system);
+            // drop(_component_registry);
         }
-        drop(_rendering_system);
-        drop(_component_test);
 
-        // let mut builder = gpu.create_command_buffer(CommandBufferUsage::OneTimeSubmit);
-
-        // let (updated, staging_buffer_index) = transform_compute.update_transforms(
-        //     &gpu,
-        //     &transform_hierarchy,
-        //     &mut builder,
-        //     true,
-        //     previous_frame_end.as_mut().unwrap(),
-        // );
-        // let command_buffer = builder.build().unwrap();
-
-        // // execute buffer copies and global compute shaders
-        // previous_frame_end = Some(
-        //     previous_frame_end
-        //         .take()
-        //         .unwrap()
-        //         .then_execute(gpu.queue.clone(), command_buffer)
-        //         .unwrap()
-        //         .then_signal_semaphore()
-        //         .then_execute(
-        //             gpu.queue.clone(),
-        //             transform_compute.command_buffer[staging_buffer_index].clone(),
-        //         )
-        //         .unwrap()
-        //         .then_signal_semaphore()
-        //         .boxed(),
-        // );
-
-        let transform_hierarchy = Arc::new(Mutex::new(transform_hierarchy));
+        // let transform_hierarchy = Arc::new(Mutex::new(transform_hierarchy));
         let (sim_frame_start, sim_frame_start_rcv) = std::sync::mpsc::sync_channel::<f32>(1);
         let (sim_frame_end_snd, sim_frame_end_rcv) = std::sync::mpsc::sync_channel::<()>(1);
-        let transform_hierarchy_clone = transform_hierarchy.clone();
-        let component_test_clone = component_test.clone();
-        // thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Crossplatform(
-        //                 48u8.try_into().unwrap(),
-        //             )).unwrap();
+        // let transform_hierarchy_clone = transform_hierarchy.clone();
+        // let component_registry_clone = component_registry.clone();
 
+        let _world = world.clone();
         let sim_thread = std::thread::spawn(move || {
             sim_frame_end_snd.send(()).unwrap();
-            let transform_hierarchy = transform_hierarchy_clone;
-            let component_test = component_test_clone;
+            // let transform_hierarchy = transform_hierarchy_clone;
+            // let component_registry = component_registry_clone;
             loop {
                 let dt = sim_frame_start_rcv.recv().unwrap();
-                // println!("Sim thread received dt: {}", dt);
-                // perform any simulation updates here
                 let time_since_epoch = std::time::SystemTime::now()
                     .duration_since(time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs_f64();
                 let angle = time_since_epoch % std::f64::consts::TAU;
                 let angle = angle as f32;
-                unsafe { TRANSLATION = Vec3::new(angle.cos(), 0.0, angle.sin()) * 5.0; }
-                let translation = unsafe { TRANSLATION * dt};
-                // let rhs = (NUM_CUBES as f32).sqrt().sqrt().sqrt().ceil() as usize;
-                // let chunk_size: usize = NUM_CUBES.div_ceil(rhs);
-                // let nt = rayon::current_num_threads();
-                let nt = rayon::current_num_threads() - 4;
-                // let chunk_size: usize = util::get_chunk_size(NUM_CUBES);
-                let chunk_size: f32 = NUM_CUBES as f32 / nt as f32;
-                // let chunk_size = 256.0f32.max(chunk_size).min(16_384.0) as usize;
-                // let chunk_size = 16_384f32;
-                let _transform_hierarchy = transform_hierarchy.lock();
-                // let t: &TransformHierarchy = &_transform_hierarchy;
-                // component_test.lock().for_each(move |ct| {
-                //     let transform = t.get_transform(ct.0).unwrap();
-                //     ct.1.update(dt, &transform);
-                // });
-                // thread_pool.install(|| {
-                (0..nt).into_par_iter().for_each(|i| {
-                    let start = (i as f32 * chunk_size) as usize;
-                    let end = ((i + 1) as f32 * chunk_size).min(NUM_CUBES as f32) as usize;
-                    for j in start..end {
-                        if let Some(t) = _transform_hierarchy.get_transform(j as u32) {
-                            let t = t.lock();
-                            t.translate_by(translation);
-                        }
-                    }
-                });
-                // let transform_hierarchy = transform_hierarchy.lock();
-                // (0..NUM_CUBES).into_par_iter().for_each(|i| {
-                //     if let Some(t) = transform_hierarchy.get_transform(i as u32) {
-                //         let mut t = t.lock();
-                //         t.translate_by(translation);
-                //     }
-                // });
-                // });
+                unsafe {
+                    TRANSLATION = Vec3::new(angle.cos(), 0.0, angle.sin()) * dt * 5.0;
+                }
+                _world.lock().update(dt);
+                // let _transform_hierarchy = transform_hierarchy.lock();
+                // component_registry
+                //     .lock()
+                //     .update_all(dt, &_transform_hierarchy);
+
                 sim_frame_end_snd.send(()).unwrap();
             }
             // });
         });
 
+        let rendering_system = world.lock().engine.rendering_system.clone();
+
         App {
             asset_manager,
             transform_compute,
             rendering_system,
-            renderers,
+            world,
+            engine,
+            // rendering_system,
+            // engine: engine::Engine {
+            //     rendering_system: rendering_system.clone(),
+            // },
+            // renderers,
             previous_frame_end: Some(sync::now(gpu.device.clone()).boxed()),
             gpu,
-            cube: Some(cube),
+            // cube: Some(cube),
             rcxs: HashMap::new(),
             fps: FPS::new(),
             time: std::time::Instant::now(),
             camera: HashMap::new(),
             cursor_grabbed: false,
-            transform_hierarchy,
-            component_test,
-            // update_transforms: true,
+            // transform_hierarchy,
             transforms_updated: false,
-            // builder: None,
             frame_time: PerfCounter::new(),
             update_sim: PerfCounter::new(),
             update_render: PerfCounter::new(),
@@ -390,6 +398,7 @@ impl App {
             sim_thread,
             sim_frame_start,
             sim_frame_end: sim_frame_end_rcv,
+            bismarck_handle,
         }
     }
 }
@@ -669,9 +678,9 @@ impl ApplicationHandler for App {
         // // test performance of non-reuse of command buffers
         // self.transform_compute.command_buffer = Vec::new();
         // self.rendering_system.command_buffer = None;
-        // for (_window_id, rcx) in self.rcxs.iter_mut() {
-        //     rcx.command_buffer = None;
-        // }
+        for (_window_id, rcx) in self.rcxs.iter_mut() {
+            rcx.command_buffer = None;
+        }
 
         // process asset loading queue
         self.asset_manager.process_deferred_queue();
@@ -683,15 +692,14 @@ impl ApplicationHandler for App {
             .gpu
             .create_command_buffer(CommandBufferUsage::OneTimeSubmit);
 
-        let transform_hierarchy = self.transform_hierarchy.lock();
+        // let transform_hierarchy = &mut self.world.lock().transform_hierarchy;
         let (updated, staging_buffer_index) = self.transform_compute.update_transforms(
             &self.gpu,
-            &transform_hierarchy,
+            &mut self.world.lock().transform_hierarchy,
             &mut builder,
             self.update_transforms_compute_shader,
             self.previous_frame_end.as_mut().unwrap(),
         );
-        drop(transform_hierarchy);
         if !self.paused {
             match self.sim_frame_start.send(elapsed) {
                 Ok(_) => {}
@@ -709,14 +717,10 @@ impl ApplicationHandler for App {
             );
         }
         self.update_render.start();
+
         let mut rendering_system = self.rendering_system.lock();
-        let renderer_updated = rendering_system.compute_renderers(
-            &mut builder,
-            &self.transform_compute.model_matrix_buffer,
-            self.asset_manager
-                .rebuild_command_buffer
-                .load(std::sync::atomic::Ordering::SeqCst),
-        );
+        let renderer_updated = rendering_system
+            .compute_renderers(&mut builder, &self.transform_compute.model_matrix_buffer);
         self.update_render.stop();
 
         let command_buffer = builder.build().unwrap();
@@ -761,9 +765,13 @@ impl ApplicationHandler for App {
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
         let mut new_window = false;
+        let mut new_bismarck = false;
         for (_window_id, rcx) in self.rcxs.iter_mut() {
             if rcx.input.get_key_pressed(KeyCode::KeyP) {
                 new_window = true;
+            }
+            if rcx.input.get_key_pressed(KeyCode::KeyB) {
+                new_bismarck = true;
             }
             let camera = self.camera.get_mut(&_window_id).unwrap();
             let mut grabbed = self.cursor_grabbed;
@@ -813,6 +821,34 @@ impl ApplicationHandler for App {
             let window_id = rcx.window.id();
             self.camera.insert(window_id, camera);
             self.rcxs.insert(window_id, rcx);
+        }
+        if new_bismarck {
+            let mut world = self.world.lock();
+            let a = world.instantiate(
+                &self
+                    .bismarck_handle
+                    .as_ref()
+                    .unwrap()
+                    .get(&self.asset_manager),
+            );
+            // println!("Instantiated bismarck: {:?}", a);
+            {
+                let bismarck = a.lock();
+                bismarck.translate_by(Vec3::new(
+                    rand::random::<f32>() * 1000.0 - 500.0,
+                    0.0,
+                    rand::random::<f32>() * 1000.0 - 500.0,
+                ));
+                bismarck.rotate_by(glam::Quat::from_axis_angle(
+                    Vec3::new(
+                        rand::random::<f32>(),
+                        rand::random::<f32>(),
+                        rand::random::<f32>(),
+                    )
+                    .normalize(),
+                    rand::random::<f32>() * std::f32::consts::TAU,
+                ));
+            }
         }
 
         static LAST_PRINT: LazyLock<Mutex<std::time::Instant>> =

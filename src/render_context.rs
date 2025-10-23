@@ -38,7 +38,7 @@ use crate::{
     asset_manager::{AssetHandle, AssetManager},
     camera::Camera,
     gpu_manager::GPUManager,
-    obj_loader::Obj,
+    obj_loader::Model,
     texture::Texture,
 };
 
@@ -299,69 +299,6 @@ impl RenderContext {
             .unwrap();
 
         rendering_system.draw(&mut builder, assets, self.pipeline.clone());
-        // let obj = obj_handle.get(assets);
-        // for mesh in &obj.meshes {
-        //     println!("Mesh has {} vertices", mesh.vertices.len());
-        //     let texture = mesh
-        //         .texture
-        //         .lock()
-        //         .as_ref()
-        //         .unwrap_or(&AssetHandle::<Texture>::default())
-        //         .get(assets);
-        //     let set = DescriptorSet::new(
-        //         gpu.desc_alloc.clone(),
-        //         self.pipeline.layout().set_layouts().get(0).unwrap().clone(),
-        //         [
-        //             WriteDescriptorSet::buffer(0, camera.uniform.clone()),
-        //             WriteDescriptorSet::image_view_sampler(
-        //                 1,
-        //                 texture.image.clone(),
-        //                 texture.sampler.clone(),
-        //             ),
-        //         ],
-        //         [],
-        //     )
-        //     .unwrap();
-        //     builder
-        //         .bind_descriptor_sets(
-        //             vulkano::pipeline::PipelineBindPoint::Graphics,
-        //             self.pipeline.layout().clone(),
-        //             0,
-        //             set.clone(),
-        //         )
-        //         .unwrap()
-        //         .bind_vertex_buffers(
-        //             0,
-        //             (
-        //                 mesh.vertex_buffer.clone(),
-        //                 mesh.tex_coord_buffer.clone(),
-        //                 mesh.normal_buffer.clone(),
-        //                 instance_buffer.clone(),
-        //             ),
-        //         )
-        //         .unwrap()
-        //         .bind_index_buffer(mesh.index_buffer.clone())
-        //         .unwrap();
-        //     unsafe {
-        //         builder
-        //             .draw_indexed(mesh.index_buffer.len() as u32, NUM_CUBES as u32, 0, 0, 0)
-        //             .unwrap();
-        //     }
-        // }
-
-        // for offset in offsets {
-        //     unsafe {
-        //         builder
-        //             .push_constants(
-        //                 self.pipeline.layout().clone(),
-        //                 0,
-        //                 crate::vs::PushConstants { offset: *offset },
-        //             )
-        //             .unwrap()
-        //             .draw_indexed(obj.index_buffer.len() as u32, 1, 0, 0, 0)
-        //             .unwrap();
-        //     }
-        // }
         builder.end_rendering().unwrap();
         // We leave the render pass.
         self.command_buffer = Some(builder.build().unwrap());

@@ -90,7 +90,7 @@ const MAX_FPS_SAMPLE_AGE: f32 = 1.0;
 // 1 << 21 = 2,097,152
 // 1 << 22 = 4,194,304
 // 1 << 23 = 8,388,608
-const NUM_CUBES: usize = 1 << 20;
+const NUM_CUBES: usize = 1 << 20; // << 20;
 struct FPS {
     frame_times: std::collections::VecDeque<f32>,
     frame_ages: std::collections::VecDeque<time::Instant>,
@@ -170,7 +170,7 @@ struct App {
     update_render: PerfCounter,
     paused: bool,
     update_transforms_compute_shader: bool,
-    sim_thread: std::thread::JoinHandle<()>,
+    // sim_thread: std::thread::JoinHandle<()>,
     sim_frame_start: std::sync::mpsc::SyncSender<f32>,
     sim_frame_end: std::sync::mpsc::Receiver<()>,
     bismarck_handle: Option<asset_manager::AssetHandle<Scene>>,
@@ -341,7 +341,8 @@ impl App {
         // let component_registry_clone = component_registry.clone();
 
         let _world = world.clone();
-        let sim_thread = std::thread::spawn(move || {
+        // let sim_thread = std::thread::spawn(move || {
+        rayon::spawn(move ||{
             sim_frame_end_snd.send(()).unwrap();
             // let transform_hierarchy = transform_hierarchy_clone;
             // let component_registry = component_registry_clone;
@@ -395,7 +396,7 @@ impl App {
             update_render: PerfCounter::new(),
             paused: false,
             update_transforms_compute_shader: true,
-            sim_thread,
+            // sim_thread,
             sim_frame_start,
             sim_frame_end: sim_frame_end_rcv,
             bismarck_handle,
@@ -563,7 +564,16 @@ impl ApplicationHandler for App {
                 }
                 rcx.build_command_buffer_perf.start();
                 let gpu = &self.gpu;
+                rcx.extra_perfs
+                    .entry("lock camera".into())
+                    .or_insert(PerfCounter::new())
+                    .start();
                 let cam = camera.lock();
+                rcx.extra_perfs.get_mut("lock camera").unwrap().stop();
+                rcx.extra_perfs
+                    .entry("wait previous frame".into())
+                    .or_insert(PerfCounter::new())
+                    .start();
                 let a = self
                     .previous_frame_end
                     .take()
@@ -574,7 +584,10 @@ impl ApplicationHandler for App {
                         rcx.command_buffer.as_ref().unwrap().clone(),
                     )
                     .unwrap();
-
+                rcx.extra_perfs
+                    .get_mut("wait previous frame")
+                    .unwrap()
+                    .stop();
                 // blit to swapchain image
                 let mut builder = self
                     .gpu
@@ -590,13 +603,18 @@ impl ApplicationHandler for App {
                     .then_signal_semaphore()
                     .then_execute(gpu.queue.clone(), builder.build().unwrap())
                     .unwrap();
-
+                rcx.draw_gui_perf.start();
                 let a = rcx
                     .gui
                     .draw_on_image(a, rcx.attachment_image_views[image_index as usize].clone());
+                rcx.draw_gui_perf.stop();
                 rcx.build_command_buffer_perf.stop();
 
                 rcx.execute_command_buffer_perf.start();
+                rcx.extra_perfs
+                    .entry("signal fence and flush".into())
+                    .or_insert(PerfCounter::new())
+                    .start();
                 let future = a
                     .then_swapchain_present(
                         gpu.queue.clone(),
@@ -606,6 +624,10 @@ impl ApplicationHandler for App {
                         ),
                     )
                     .then_signal_fence_and_flush();
+                rcx.extra_perfs
+                    .get_mut("signal fence and flush")
+                    .unwrap()
+                    .stop();
 
                 match future.map_err(Validated::unwrap) {
                     Ok(future) => {
@@ -641,46 +663,14 @@ impl ApplicationHandler for App {
         self.update_sim.start();
         if !self.paused {
             self.sim_frame_end.recv().unwrap();
-            // let time_since_epoch = std::time::SystemTime::now()
-            //     .duration_since(time::UNIX_EPOCH)
-            //     .unwrap()
-            //     .as_secs_f64();
-            // let angle = time_since_epoch % std::f64::consts::TAU;
-            // let angle = angle as f32;
-            // let translation = Vec3::new(angle.cos(), 0.0, angle.sin()) * elapsed * 5.0;
-            // // let rhs = (NUM_CUBES as f32).sqrt().sqrt().sqrt().ceil() as usize;
-            // // let chunk_size: usize = NUM_CUBES.div_ceil(rhs);
-            // let nt = rayon::current_num_threads();
-            // // let chunk_size: usize = util::get_chunk_size(NUM_CUBES);
-            // let chunk_size: f32 = NUM_CUBES as f32 / nt as f32;
-            // // let chunk_size = 256.0f32.max(chunk_size).min(16_384.0) as usize;
-            // // let chunk_size = 16_384f32;
-            // (0..nt).into_par_iter().for_each(|i| {
-            //     let start = (i as f32 * chunk_size as f32) as usize;
-            //     let end = ((i + 1) as f32 * chunk_size as f32).min(NUM_CUBES as f32) as usize;
-            //     for j in start..end {
-            //         if let Some(t) = self.transform_hierarchy.get_transform(j as u32) {
-            //             let t = t.lock();
-            //             t.translate_by(translation);
-            //         }
-            //     }
-            // });
-            // // (0..NUM_CUBES).into_par_iter().for_each(|i| {
-            // //     // chunk.into_iter().for_each(|i| {
-            // //         if let Some(t) = self.transform_hierarchy.get_transform(i as u32) {
-            // //             let t = t.lock();
-            // //             t.translate_by(translation);
-            // //         }
-            // //     // });
-            // // });
         }
         self.update_sim.stop();
         // // test performance of non-reuse of command buffers
         // self.transform_compute.command_buffer = Vec::new();
         // self.rendering_system.command_buffer = None;
-        for (_window_id, rcx) in self.rcxs.iter_mut() {
-            rcx.command_buffer = None;
-        }
+        // for (_window_id, rcx) in self.rcxs.iter_mut() {
+        //     rcx.command_buffer = None;
+        // }
 
         // process asset loading queue
         self.asset_manager.process_deferred_queue();
@@ -869,16 +859,21 @@ impl ApplicationHandler for App {
                 );
                 for (_window_id, rcx) in self.rcxs.iter() {
                     println!(
-                        "window {:?} frame time: {:?} / cleanup: {:?} / swap chain: {:?} / acquire next image: {:?} / update camera: {:?} / build command buffer: {:?} / execute command buffer: {:?}",
+                        "window {:?} frame time: {:?} / cleanup: {:?} / swap chain: {:?} / acquire next image: {:?} / update camera: {:?} / draw gui: {:?} / build command buffer: {:?} / execute command buffer: {:?}",
                         rcx.window.id(),
                         rcx.frame_time,
                         rcx.cleanup,
                         rcx.swap_chain_perf,
                         rcx.acquire_next_image_perf,
                         rcx.update_camera_perf,
+                        rcx.draw_gui_perf,
                         rcx.build_command_buffer_perf,
                         rcx.execute_command_buffer_perf
                     );
+                    for (name, perf) in rcx.extra_perfs.iter() {
+						print!("  {}: {:?} ", name, perf);
+					}
+					println!("");
                     println!("Camera position: {:?}", rcx.camera.lock().pos);
                 }
                 *last_print = std::time::Instant::now();

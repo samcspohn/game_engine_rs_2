@@ -75,6 +75,7 @@ where
                 self.buffer.clone().slice(self.size as u64..),
             ))
             .unwrap();
+        self.size = self.data.len();
         ret
     }
     pub fn force_update(
@@ -118,7 +119,12 @@ where
         self.size = 0;
         self.data.clear();
     }
-    pub fn resize_buffer(&mut self, new_size: usize, gpu: &GPUManager, builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>) -> bool {
+    pub fn resize_buffer(
+        &mut self,
+        new_size: usize,
+        gpu: &GPUManager,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    ) -> bool {
         self.size = new_size;
         if new_size > self.buffer.len() as usize {
             let buf = gpu.buffer_array(

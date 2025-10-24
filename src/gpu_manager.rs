@@ -1,8 +1,11 @@
 use std::{
-    cell::SyncUnsafeCell, collections::HashMap, ops::Sub, sync::{
+    cell::SyncUnsafeCell,
+    collections::HashMap,
+    ops::Sub,
+    sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-    }
+    },
 };
 
 use force_send_sync::SendSync;
@@ -225,35 +228,35 @@ impl GPUManager {
             device.clone(),
             Default::default(),
         ));
-        let sub_alloc = SubbufferAllocator::new(
-            mem_alloc.clone(),
-            SubbufferAllocatorCreateInfo {
-                buffer_usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_SRC,
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-        );
+        // let sub_alloc = SubbufferAllocator::new(
+        //     mem_alloc.clone(),
+        //     SubbufferAllocatorCreateInfo {
+        //         buffer_usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_SRC,
+        //         memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+        //             | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+        //         ..Default::default()
+        //     },
+        // );
 
-        let storage_alloc = SubbufferAllocator::new(
-            mem_alloc.clone(),
-            SubbufferAllocatorCreateInfo {
-                buffer_usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-        );
+        // let storage_alloc = SubbufferAllocator::new(
+        //     mem_alloc.clone(),
+        //     SubbufferAllocatorCreateInfo {
+        //         buffer_usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        //         memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+        //             | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+        //         ..Default::default()
+        //     },
+        // );
 
-        let ind_alloc = SubbufferAllocator::new(
-            mem_alloc.clone(),
-            SubbufferAllocatorCreateInfo {
-                buffer_usage: BufferUsage::INDIRECT_BUFFER | BufferUsage::TRANSFER_SRC,
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-        );
+        // let ind_alloc = SubbufferAllocator::new(
+        //     mem_alloc.clone(),
+        //     SubbufferAllocatorCreateInfo {
+        //         buffer_usage: BufferUsage::INDIRECT_BUFFER | BufferUsage::TRANSFER_SRC,
+        //         memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+        //             | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+        //         ..Default::default()
+        //     },
+        // );
 
         let window = Arc::new(
             event_loop
@@ -318,25 +321,21 @@ impl GPUManager {
     }
 
     pub fn sub_alloc(&self, usage: BufferUsage) -> Arc<SendSync<SubbufferAllocator>> {
-        if let Some(alloc) = self
-            ._sub_alloc
-            .read()
-            .get(&(usage))
-        {
+        if let Some(alloc) = self._sub_alloc.read().get(&(usage)) {
             return alloc.clone();
         }
-        let alloc = unsafe { Arc::new(SendSync::new(SubbufferAllocator::new(
-            self.mem_alloc.clone(),
-            SubbufferAllocatorCreateInfo {
-                buffer_usage: usage | BufferUsage::TRANSFER_SRC,
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-        ))) };
-        self._sub_alloc
-            .write()
-            .insert(usage, alloc.clone());
+        let alloc = unsafe {
+            Arc::new(SendSync::new(SubbufferAllocator::new(
+                self.mem_alloc.clone(),
+                SubbufferAllocatorCreateInfo {
+                    buffer_usage: usage | BufferUsage::TRANSFER_SRC,
+                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                        | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                    ..Default::default()
+                },
+            )))
+        };
+        self._sub_alloc.write().insert(usage, alloc.clone());
         alloc
     }
 

@@ -678,7 +678,6 @@ dependencies = [
  "nohash-hasher",
  "parking_lot",
  "profiling",
- "rayon",
  "serde",
 ]
 

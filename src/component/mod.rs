@@ -10,7 +10,11 @@ use glam::{Quat, Vec3};
 use parking_lot::Mutex;
 
 use crate::{
-    asset_manager::AssetHandle, engine::Engine, gpu_manager::GPUManager, renderer::{_RendererComponent, RendererComponent}, transform::{self, _Transform, Transform, TransformHierarchy}
+    asset_manager::AssetHandle,
+    engine::Engine,
+    gpu_manager::GPUManager,
+    renderer::{_RendererComponent, RendererComponent},
+    transform::{self, _Transform, Transform, TransformHierarchy},
 };
 use rayon::prelude::*;
 
@@ -96,50 +100,116 @@ where
     }
     fn par_iter<F>(&self, f: F, transform_hierarchy: &TransformHierarchy)
     where
-        F: Fn(&mut T, &Transform) + Sync + Send,
+        F: Fn(&mut T, &Transform) + Sync + Send + Copy,
     {
-        let nt = rayon::current_num_threads();
-        let chunk_size = (self.extent + nt - 1) / nt; // ceiling division without floats
+        // let nt = (rayon::current_num_threads())
+        //     .min(self.extent.div_ceil(256))
+        //     .max(1);
+        // let chunk_size = (self.extent + nt - 1) / nt; // ceiling division without floats
+        // let chunk_size = self.extent.div_ceil(nt);
+        // rayon::scope(|s| {
+        //     for i in 0..nt {
+        //         s.spawn(move |_| {
+        //             let start = i * chunk_size;
+        //             let end = ((i + 1) * chunk_size).min(self.extent);
 
-        (0..nt).into_par_iter().for_each(|i| {
-            let start = i * chunk_size;
-            let end = ((i + 1) * chunk_size).min(self.extent);
+        //             let mut idx = start;
+        //             while idx < end {
+        //                 let atomic_idx = idx >> 5;
+        //                 let bits =
+        //                     self.active[atomic_idx].load(std::sync::atomic::Ordering::Relaxed);
 
-            if start >= end {
-                return; // early exit for threads with empty ranges
-            }
+        //                 // Calculate the range of bits to check in this atomic u32
+        //                 // let start_bit = idx & 31;
+        //                 let next_atomic_boundary = (atomic_idx + 1) << 5;
+        //                 let end_bit_idx = next_atomic_boundary.min(end);
 
-            let mut idx = start;
+        //                 // Process each bit in this u32 within our range
+        //                 for current_idx in idx..end_bit_idx {
+        //                     let bit_idx = current_idx & 31;
+        //                     if (bits & (1 << bit_idx)) != 0 {
+        //                         let component = self._get_unchecked(current_idx as u32);
+        //                         let transform =
+        //                             transform_hierarchy.get_transform(current_idx as u32);
+        //                         {
+        //                             let mut component_guard = component.lock();
+        //                             f(&mut *component_guard, &transform);
+        //                         }
+        //                     }
+        //                 }
 
-            while idx < end {
-                let atomic_idx = idx >> 5;
-                let bits = self.active[atomic_idx].load(std::sync::atomic::Ordering::Relaxed);
+        //                 // Move to next atomic u32
+        //                 idx = next_atomic_boundary;
+        //             }
+        //         });
+        //     }
+        // });
+        // (0..nt).into_par_iter().for_each(|i| {
+        //     let start = i * chunk_size;
+        //     let end = ((i + 1) * chunk_size).min(self.extent);
 
-                // Calculate the range of bits to check in this atomic u32
-                // let start_bit = idx & 31;
-                let next_atomic_boundary = (atomic_idx + 1) << 5;
-                let end_bit_idx = next_atomic_boundary.min(end);
+        //     if start >= end {
+        //         return; // early exit for threads with empty ranges
+        //     }
 
-                // Process each bit in this u32 within our range
-                for current_idx in idx..end_bit_idx {
-                    let bit_idx = current_idx & 31;
-                    if (bits & (1 << bit_idx)) != 0 {
-                        let component = self._get_unchecked(current_idx as u32);
-                        let transform = transform_hierarchy.get_transform(current_idx as u32);
-                        {
-                            let mut component_guard = component.lock();
-                            f(&mut *component_guard, &transform);
+        //     let mut idx = start;
+
+        //     while idx < end {
+        //         let atomic_idx = idx >> 5;
+        //         let bits = self.active[atomic_idx].load(std::sync::atomic::Ordering::Relaxed);
+
+        //         // Calculate the range of bits to check in this atomic u32
+        //         // let start_bit = idx & 31;
+        //         let next_atomic_boundary = (atomic_idx + 1) << 5;
+        //         let end_bit_idx = next_atomic_boundary.min(end);
+
+        //         // Process each bit in this u32 within our range
+        //         for current_idx in idx..end_bit_idx {
+        //             let bit_idx = current_idx & 31;
+        //             if (bits & (1 << bit_idx)) != 0 {
+        //                 let component = self._get_unchecked(current_idx as u32);
+        //                 let transform = transform_hierarchy.get_transform(current_idx as u32);
+        //                 {
+        //                     let mut component_guard = component.lock();
+        //                     f(&mut *component_guard, &transform);
+        //                 }
+        //             }
+        //         }
+
+        //         // Move to next atomic u32
+        //         idx = next_atomic_boundary;
+        //     }
+        // });
+        self.active
+            .par_iter()
+            .enumerate()
+            .chunks(8)
+            .for_each(|chunk| {
+                for (atomic_idx, atomic) in chunk {
+                    let bits = atomic.load(std::sync::atomic::Ordering::Relaxed);
+                    if bits == 0 {
+                        return; // skip if no active components in this chunk
+                    }
+                    let base_idx = atomic_idx << 5;
+                    for bit_idx in 0..32 {
+                        if (bits & (1 << bit_idx)) != 0 {
+                            let current_idx = base_idx + bit_idx;
+                            if current_idx >= self.extent {
+                                break;
+                            }
+                            let component = self._get_unchecked(current_idx as u32);
+                            let transform = transform_hierarchy.get_transform(current_idx as u32);
+                            {
+                                let mut component_guard = component.lock();
+                                f(&mut *component_guard, &transform);
+                            }
                         }
                     }
                 }
-
-                // Move to next atomic u32
-                idx = next_atomic_boundary;
-            }
-        });
+            });
     }
 
-    pub fn update(&self, dt: f32, transform_hierarchy: &TransformHierarchy) {
+    pub fn _update(&self, dt: f32, transform_hierarchy: &TransformHierarchy) {
         if self.has_update {
             self.par_iter(|c, t| c.update(dt, t), transform_hierarchy);
         }
@@ -157,9 +227,16 @@ impl<T: Component + Clone + Send + Sync + 'static> ComponentStorageTrait for Com
         self.delete(idx);
     }
     fn update(&self, dt: f32, transform_hierarchy: &TransformHierarchy) {
-        self.update(dt, transform_hierarchy);
+        self._update(dt, transform_hierarchy);
     }
-    fn clone_from_other(&mut self, other: &dyn ComponentStorageTrait, src_idx: u32, dst_idx: u32, e: &Engine, t: &Transform) {
+    fn clone_from_other(
+        &mut self,
+        other: &dyn ComponentStorageTrait,
+        src_idx: u32,
+        dst_idx: u32,
+        e: &Engine,
+        t: &Transform,
+    ) {
         if let Some(other_storage) = other.as_any().downcast_ref::<ComponentStorage<T>>() {
             if let Some(other_component_mutex) = other_storage.get(src_idx) {
                 let other_component = other_component_mutex.lock();
@@ -176,7 +253,14 @@ trait ComponentStorageTrait {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
     fn remove(&mut self, idx: u32);
     fn update(&self, dt: f32, transform_hierarchy: &TransformHierarchy);
-    fn clone_from_other(&mut self, other: &dyn ComponentStorageTrait, src_idx: u32, dst_idx: u32, e: &Engine, t: &Transform);
+    fn clone_from_other(
+        &mut self,
+        other: &dyn ComponentStorageTrait,
+        src_idx: u32,
+        dst_idx: u32,
+        e: &Engine,
+        t: &Transform,
+    );
 }
 
 pub struct ComponentRegistry {
@@ -298,7 +382,7 @@ impl Scene {
     }
 
     pub fn remove_component<T>(&mut self, entity: Entity)
-     where
+    where
         T: Component + Clone + Send + Sync + 'static,
     {
         if let Some(storage) = self.components.get_storage_mut::<T>() {
@@ -312,7 +396,7 @@ impl Scene {
     }
 
     pub fn get_component<T>(&self, entity: Entity) -> Option<&Mutex<T>>
-     where
+    where
         T: Component + Send + Sync + 'static,
     {
         if let Some(storage) = self.components.get_storage::<T>() {
@@ -326,7 +410,6 @@ impl Scene {
     pub fn instantiate(&mut self, other: &Scene) -> Transform<'_> {
         let mut entity_map = HashMap::new();
 
-        
         for t_idx in 0..other.transform_hierarchy.len() as u32 {
             let other_transform = other.transform_hierarchy.get_transform_(t_idx);
             let new_transform = _Transform {
@@ -334,9 +417,11 @@ impl Scene {
                 rotation: other_transform.rotation,
                 scale: other_transform.scale,
                 name: other_transform.name.clone(),
-                parent: other_transform.parent.map(|p| *entity_map.get(&p).unwrap_or_else(|| {
-                    panic!("Parent transform {} not found in entity_map", p)
-                })),
+                parent: other_transform.parent.map(|p| {
+                    *entity_map
+                        .get(&p)
+                        .unwrap_or_else(|| panic!("Parent transform {} not found in entity_map", p))
+                }),
             };
             let new_entity = self.new_entity(new_transform);
             entity_map.insert(t_idx, new_entity.id);
@@ -352,9 +437,8 @@ impl Scene {
         //             .set_parent(&_lock, Some(new_parent));
         //     }
         // }
-        
-        for (type_id, other_storage) in &other.components.components {
 
+        for (type_id, other_storage) in &other.components.components {
             // handle special case for _RendererComponent
             if type_id == &TypeId::of::<_RendererComponent>() {
                 let self_storage = self
@@ -369,17 +453,20 @@ impl Scene {
                     if let Some(other_component_mutex) = other_storage.get(t_idx) {
                         let other_component = other_component_mutex.lock();
                         let model = other_component.model.clone();
-                        println!("({} -> {}) m: {}", t_idx, entity_map.get(&t_idx).unwrap(), model.asset_id);
+                        println!(
+                            "({} -> {}) m: {}",
+                            t_idx,
+                            entity_map.get(&t_idx).unwrap(),
+                            model.asset_id
+                        );
                         let mut component = RendererComponent::new(model);
                         component.init(
-                            &self.transform_hierarchy.get_transform(*entity_map.get(&t_idx).unwrap()),
+                            &self
+                                .transform_hierarchy
+                                .get_transform(*entity_map.get(&t_idx).unwrap()),
                             &self.engine,
                         );
-                        self_storage.set(
-                            *entity_map.get(&t_idx).unwrap(),
-                            component,
-                        );
-                        
+                        self_storage.set(*entity_map.get(&t_idx).unwrap(), component);
                     }
                 }
             } else {
@@ -390,7 +477,9 @@ impl Scene {
                             t_idx,
                             *entity_map.get(&t_idx).unwrap(),
                             &self.engine,
-                            &self.transform_hierarchy.get_transform(*entity_map.get(&t_idx).unwrap()),
+                            &self
+                                .transform_hierarchy
+                                .get_transform(*entity_map.get(&t_idx).unwrap()),
                         );
                     }
                 }

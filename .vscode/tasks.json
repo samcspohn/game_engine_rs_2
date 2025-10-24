@@ -1,0 +1,37 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "cargo",
+			"command": "build",
+			"args": ["--bin=game_engine_rs_2", "--package=game_engine_rs_2"],
+			"problemMatcher": ["$rustc"],
+			"label": "cargo build",
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			}
+		},
+		{
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--bin=game_engine_rs_2", "--package=game_engine_rs_2"],
+			"problemMatcher": ["$rustc"],
+			"label": "cargo build (shell)",
+			"group": "build"
+		},
+		{
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"--release",
+				"--bin=game_engine_rs_2",
+				"--package=game_engine_rs_2"
+			],
+			"problemMatcher": ["$rustc"],
+			"label": "cargo build --release (shell)",
+			"group": "build"
+		}
+	]
+}

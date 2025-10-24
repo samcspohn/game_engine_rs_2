@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 use egui_winit_vulkano::{Gui, GuiConfig};
 use parking_lot::Mutex;
@@ -67,6 +67,7 @@ pub struct RenderContext {
     pub cleanup: crate::PerfCounter,
     pub acquire_next_image_perf: crate::PerfCounter,
     pub draw_gui_perf: crate::PerfCounter,
+    pub extra_perfs: HashMap<String, crate::PerfCounter>,
 }
 
 impl RenderContext {
@@ -239,6 +240,7 @@ impl RenderContext {
             cleanup: crate::PerfCounter::new(),
             acquire_next_image_perf: crate::PerfCounter::new(),
             draw_gui_perf: crate::PerfCounter::new(),
+            extra_perfs: HashMap::new(),
         }
     }
 

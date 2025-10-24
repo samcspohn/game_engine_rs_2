@@ -21,7 +21,29 @@
 			},
 			"args": [],
 			"cwd": "${workspaceFolder}",
-			"program": "${workspaceFolder}/target/debug/game_engine_rs_2"
+			"program": "${workspaceFolder}/target/debug/game_engine_rs_2",
+			"preLaunchTask": "cargo build (shell)"
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug executable 'game_engine_rs_2' (release)",
+			"cargo": {
+				"args": [
+					"build",
+					"--release",
+					"--bin=game_engine_rs_2",
+					"--package=game_engine_rs_2"
+				],
+				"filter": {
+					"name": "game_engine_rs_2",
+					"kind": "bin"
+				}
+			},
+			"args": [],
+			"cwd": "${workspaceFolder}",
+			"program": "${workspaceFolder}/target/release/game_engine_rs_2",
+			"preLaunchTask": "cargo build --release (shell)"
 		},
 		{
 			"type": "lldb",
@@ -40,7 +62,8 @@
 				}
 			},
 			"args": [],
-			"cwd": "${workspaceFolder}"
+			"cwd": "${workspaceFolder}",
+			"preLaunchTask": "cargo build (shell)"
 		}
 	]
 }

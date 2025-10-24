@@ -394,7 +394,7 @@ impl TransformCompute {
             // const OUTER: usize = 32;
             let len = hierarchy.len();
             const INNER: usize = 32; // 32 transforms per flag u32
-            let nt = rayon::current_num_threads();
+            let nt = rayon::current_num_threads().min(len.div_ceil(1024)).max(1);
             let outer = len.div_ceil(INNER).div_ceil(nt);
             (0..nt).into_par_iter().for_each(|chunk_id| {
                 // let parent_updates = parent_updates.clone();

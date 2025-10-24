@@ -188,7 +188,7 @@ where
                 for (atomic_idx, atomic) in chunk {
                     let bits = atomic.load(std::sync::atomic::Ordering::Relaxed);
                     if bits == 0 {
-                        return; // skip if no active components in this chunk
+                        continue; // skip if no active components in this chunk
                     }
                     let base_idx = atomic_idx << 5;
                     for bit_idx in 0..32 {

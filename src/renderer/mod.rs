@@ -64,7 +64,8 @@ pub struct RenderingSystem {
     dispatch: Subbuffer<[DispatchIndirectCommand]>,
     // data
     // model_indirect_buffer_len: usize,
-    model_map: HashMap<u32, u32>, // model_id -> intermediate idx
+    model_map: HashMap<u32, u32>, // model_id -> model_indirect_buffer idx
+    model_asset_map: HashMap<u32, Arc<Model>>,
     // indirect_map: HashMap<u32, u32>, // intermediate -> model_indirect_buffer idx
     // indirect_counts: HashMap<u32, u32>,
     // model_counts: HashMap<u32, u32>,
@@ -189,6 +190,7 @@ impl RenderingSystem {
             ),
             gpu,
             model_map: HashMap::new(),
+            model_asset_map: HashMap::new(),
             // indirect_map: HashMap::new(),
             // intermediate_counter: AtomicU32::new(0),
             renderer_storage: Storage::new(),
@@ -223,6 +225,7 @@ impl RenderingSystem {
         let m_id = model.asset_id;
         // let m_idx = model.get(assets).id;
         // let t_idx = transform.get_idx();
+        self.model_asset_map.insert(m_id, asset.clone());
 
         let ind_idx = *self.model_map.get(&m_id).expect("Model not pre-registered");
         let mesh_count = asset.meshes.len() as u32;
@@ -539,13 +542,18 @@ impl RenderingSystem {
         assets: &AssetManager,
         pipeline: Arc<GraphicsPipeline>,
     ) {
+        let placeholder_model = self.model_asset_map.get(&0).unwrap();
         for (model_asset_id, ind_idx) in &self.model_map {
             // let indirect_idx = *self.indirect_map.get(ind_idx).unwrap();
-            let obj = AssetHandle::<Model>::_from_id(*model_asset_id);
+            // let obj = AssetHandle::<Model>::_from_id(*model_asset_id);
             // if indirect_idx != *ind_idx && indirect_idx != 0 {
             //     panic!("index out of order")
             // }
-            let model = obj.get(assets);
+            // let model = obj.get(assets);
+            let model = self
+                .model_asset_map
+                .get(model_asset_id)
+                .unwrap_or(&placeholder_model);
             for (i, mesh) in model.meshes.iter().enumerate() {
                 let texture = mesh
                     .texture

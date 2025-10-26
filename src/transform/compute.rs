@@ -12,7 +12,7 @@ use rayon::iter::{
     IntoParallelRefMutIterator, ParallelIterator,
 };
 use vulkano::{
-    buffer::{BufferUsage, Subbuffer},
+    buffer::{BufferContents, BufferUsage, BufferWriteGuard, Subbuffer},
     command_buffer::{
         AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, DispatchIndirectCommand,
         PrimaryAutoCommandBuffer,
@@ -27,7 +27,7 @@ use vulkano::{
     sync::GpuFuture,
 };
 
-use crate::gpu_manager::GPUManager;
+use crate::{gpu_manager::GPUManager, MAX_FRAMES_IN_FLIGHT};
 
 use super::{TransformComponent, TransformHierarchy};
 
@@ -262,7 +262,7 @@ impl TransformCompute {
                 MemoryTypeFilter::PREFER_DEVICE,
                 BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
             ),
-            staging_buffers: (0..gpu.image_count as usize + 2)
+            staging_buffers: (0..MAX_FRAMES_IN_FLIGHT * 2)
                 .map(|_| TransformUpdateBuffers::new(gpu))
                 .collect(),
             staging_buffer_index: 0,
@@ -306,14 +306,57 @@ impl TransformCompute {
             ),
         }
     }
+    fn aquire_buf<'a, T>(buf: &'a Subbuffer<[T]>) -> BufferWriteGuard<'a, [T]>
+    where
+        T: BufferContents,
+    {
+        loop {
+            if let Ok(b) = buf.write() {
+                break b;
+            } else {
+                std::thread::yield_now();
+                // println!("Waiting for staging buffer write lock");
+            }
+            // gpu_future.cleanup_finished();
+        }
+    }
+    // fn write_bufs<'a>(
+    //     &'a mut self,
+    //     sbi: &mut usize,
+    //     len: u64,
+    //     gpu: &GPUManager,
+    // ) -> (
+    //     BufferWriteGuard<'a, [f32]>,
+    //     BufferWriteGuard<'a, [f32]>,
+    //     BufferWriteGuard<'a, [f32]>,
+    //     BufferWriteGuard<'a, [u32]>,
+    // ) {
+    //     let can_acquire = {
+    //         self.staging_buffers[*sbi].position.write().is_ok()
+    //             && self.staging_buffers[*sbi].rotation.write().is_ok()
+    //             && self.staging_buffers[*sbi].scale.write().is_ok()
+    //             && self.staging_buffers[*sbi].flags.write().is_ok()
+    //     };
 
+    //     if !can_acquire {
+    //         self.staging_buffers
+    //             .push(TransformUpdateBuffers::new(gpu, len));
+    //         *sbi = (self.staging_buffers.len() - 1);
+    //     }
+
+    //     let position_buf = self.staging_buffers[*sbi].position.write().unwrap();
+    //     let rotation_buf = self.staging_buffers[*sbi].rotation.write().unwrap();
+    //     let scale_buf = self.staging_buffers[*sbi].scale.write().unwrap();
+    //     let flags_buf = self.staging_buffers[*sbi].flags.write().unwrap();
+    //     (position_buf, rotation_buf, scale_buf, flags_buf)
+    // }
     pub fn update_transforms(
         &mut self,
         gpu: &GPUManager,
         hierarchy: &TransformHierarchy,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         update_transforms_compute_shader: bool,
-        gpu_future: &mut Box<dyn GpuFuture>,
+        // gpu_future: &mut Box<dyn GpuFuture>,
     ) -> (bool, usize) {
         let sbi = self.staging_buffer_index;
 
@@ -370,19 +413,21 @@ impl TransformCompute {
                     .map(|_| Mutex::new(Vec::new()))
                     .collect(),
             );
+
             // if update_transforms_compute_shader {
-            let position_buf = loop {
-                if let Ok(b) = self.staging_buffers[sbi].position.write() {
-                    break b;
-                } else {
-                    // println!("Waiting for position staging buffer write lock");
-                }
-                gpu_future.cleanup_finished();
-            };
-            let pos_cell = SyncUnsafeCell::new(position_buf);
-            let rot_cell = SyncUnsafeCell::new(self.staging_buffers[sbi].rotation.write().unwrap());
-            let scale_cell = SyncUnsafeCell::new(self.staging_buffers[sbi].scale.write().unwrap());
-            let flags_cell = SyncUnsafeCell::new(self.staging_buffers[sbi].flags.write().unwrap());
+            // let position_buf = loop {
+            //     if let Ok(b) = self.staging_buffers[sbi].position.write() {
+            //         break b;
+            //     } else {
+            //         std::thread::yield_now();
+            //         // println!("Waiting for position staging buffer write lock");
+            //     }
+            //     // gpu_future.cleanup_finished();
+            // };
+            let pos_cell = SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].position));
+            let rot_cell = SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].rotation));
+            let scale_cell = SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].scale));
+            let flags_cell = SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].flags));
             // let dirty_l2 = SyncUnsafeCell::new(self.staging_buffers[sbi].dirty_l2.write().unwrap());
             let _hierarchy = SyncUnsafeCell::new(hierarchy);
 

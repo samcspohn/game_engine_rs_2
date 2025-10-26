@@ -86,6 +86,9 @@ fn recursive_access_node(
             // Read texture coordinates (UV)
             if let Some(tex_coords_iter) = reader.read_tex_coords(0) {
                 tex_coords.extend(tex_coords_iter.into_f32());
+            } else {
+            	// If no texture coordinates, fill with zeroes
+				tex_coords.extend(std::iter::repeat([0.0, 0.0]).take(vertices.len()));
             }
 
             // Read indices
@@ -214,9 +217,10 @@ impl Asset for Scene {
     where
         Self: Sized,
     {
+        println!("Importing {:?}", path.as_ref());
         let (document, buffers, images) =
             gltf::import(path.as_ref()).map_err(|e| format!("Failed to open GLTF file: {}", e))?;
-
+        println!("{:?} import completed", path.as_ref());
         // recursive_print_json(document.as_json()., 0);
         // println!("Document {:?}", document);
         let root = document.as_json();

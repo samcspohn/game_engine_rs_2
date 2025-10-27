@@ -292,6 +292,8 @@ impl GPUManager {
             1,
         )
         .unwrap();
+        let image_count = surface_capabilities.min_image_count;
+        println!("Image count: {}", image_count);
 
         Arc::new(Self {
             empty,
@@ -308,7 +310,7 @@ impl GPUManager {
             _sub_alloc: RwLock::new(HashMap::new()),
             work_queue: GPUWorkQueue::new(),
             surface_format,
-            image_count: surface_capabilities.min_image_count.max(2),
+            image_count,
             query_pool: QueryPool::new(
                 device.clone(),
                 QueryPoolCreateInfo {

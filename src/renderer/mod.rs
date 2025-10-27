@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::Sub,
     sync::{
         Arc,
@@ -28,8 +28,9 @@ use crate::{
     component::Component,
     engine::Engine,
     gpu_manager::{GPUManager, gpu_vec::GpuVec},
-    obj_loader::Model,
+    obj_loader::{MESH_BUFFERS, Model},
     renderer,
+    texture::Texture,
     transform::Transform,
     util::Storage,
 };
@@ -65,6 +66,7 @@ pub struct RenderingSystem {
     // data
     // model_indirect_buffer_len: usize,
     model_map: HashMap<u32, u32>, // model_id -> model_indirect_buffer idx
+    used_model_set: HashSet<u32>,
     model_asset_map: HashMap<u32, Arc<Model>>,
     // indirect_map: HashMap<u32, u32>, // intermediate -> model_indirect_buffer idx
     // indirect_counts: HashMap<u32, u32>,
@@ -190,6 +192,7 @@ impl RenderingSystem {
             ),
             gpu,
             model_map: HashMap::new(),
+            used_model_set: HashSet::new(),
             model_asset_map: HashMap::new(),
             // indirect_map: HashMap::new(),
             // intermediate_counter: AtomicU32::new(0),
@@ -225,9 +228,9 @@ impl RenderingSystem {
         let m_id = model.asset_id;
         // let m_idx = model.get(assets).id;
         // let t_idx = transform.get_idx();
-        self.model_asset_map.insert(m_id, asset.clone());
+        let ind_idx = self.get_or_register_model_handle(model);
+        self.model_asset_map.insert(ind_idx, asset.clone());
 
-        let ind_idx = *self.model_map.get(&m_id).expect("Model not pre-registered");
         let mesh_count = asset.meshes.len() as u32;
         // let model_indirect_buffer_idx = self.model_indirect_buffer.data_len() as u32;
         // if let Some(prev) = self
@@ -257,7 +260,16 @@ impl RenderingSystem {
         // let ind_idx = *self.indirect_map.get(&intermediate_idx).unwrap();
 
         let indirect_offset = self.indirect_commands_buffer.data_len() as u32;
-        // self.model_map.insert(m_id, a as u32);
+        for mesh in &asset.meshes {
+            self.indirect_commands_buffer
+                .push_data(DrawIndexedIndirectCommand {
+                    index_count: mesh.indices.len() as u32,
+                    instance_count: 0,
+                    first_index: mesh.index_offset,
+                    vertex_offset: mesh.vertex_offset,
+                    first_instance: 0,
+                });
+        }
         *self
             .model_indirect_buffer
             .get_data_mut(ind_idx as usize)
@@ -265,19 +277,9 @@ impl RenderingSystem {
             offset: indirect_offset,
             count: mesh_count,
         };
-        for mesh in &asset.meshes {
-            self.indirect_commands_buffer
-                .push_data(DrawIndexedIndirectCommand {
-                    index_count: mesh.indices.len() as u32,
-                    instance_count: 0,
-                    first_index: 0,
-                    vertex_offset: 0,
-                    first_instance: 0,
-                });
-        }
-        self.model_registered
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.command_buffer = None; // invalidate command buffer
+        // self.model_registered
+        //     .store(true, std::sync::atomic::Ordering::SeqCst);
+        // self.command_buffer = None; // invalidate command buffer
     }
     // pub fn update_num_counts(&mut self, model: AssetHandle<Model>) {
     //     let asset_id = model.asset_id;
@@ -299,14 +301,24 @@ impl RenderingSystem {
     //     //     .or_insert(1);
     // }
     pub fn renderer(&mut self, model: AssetHandle<Model>, transform: &Transform) -> u32 {
-        let m_id = self.get_or_register_model_handle(model.clone());
+        let ind_id = self.get_or_register_model_handle(model.clone());
+        if self.used_model_set.insert(ind_id) {
+            self.model_registered
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         // self.update_num_counts(model);
         let t_idx = transform.get_idx();
-        let renderer = Renderer { m_id, t_idx };
+        let renderer = Renderer {
+            m_id: ind_id,
+            t_idx,
+        };
         let r_idx = self.renderer_storage.insert(renderer);
         self.renderer_inits_buffer.push_data(cs::RendererInit {
             idx: r_idx,
-            r: cs::Renderer { t_idx, m_id },
+            r: cs::Renderer {
+                t_idx,
+                m_id: ind_id,
+            },
             padding: 0,
         });
         r_idx
@@ -353,7 +365,7 @@ impl RenderingSystem {
         self.renderer_inits_buffer.clear();
         self.renderer_uninits_buffer.clear();
 
-        ret |= self.indirect_commands_buffer.data_len() != self.indirect_commands_buffer.buf_len();
+        ret |= self.indirect_commands_buffer.data_len() >= self.indirect_commands_buffer.buf_len();
         ret |= self
             .indirect_commands_buffer
             .upload_delta(&self.gpu, builder);
@@ -542,74 +554,56 @@ impl RenderingSystem {
         assets: &AssetManager,
         pipeline: Arc<GraphicsPipeline>,
     ) {
-        let placeholder_model = self.model_asset_map.get(&0).unwrap();
-        for (model_asset_id, ind_idx) in &self.model_map {
-            // let indirect_idx = *self.indirect_map.get(ind_idx).unwrap();
-            // let obj = AssetHandle::<Model>::_from_id(*model_asset_id);
-            // if indirect_idx != *ind_idx && indirect_idx != 0 {
-            //     panic!("index out of order")
-            // }
-            // let model = obj.get(assets);
-            let model = self
-                .model_asset_map
-                .get(model_asset_id)
-                .unwrap_or(&placeholder_model);
-            for (i, mesh) in model.meshes.iter().enumerate() {
-                let texture = mesh
-                    .texture
-                    .lock()
-                    .as_ref()
-                    .unwrap_or(&AssetHandle::default())
-                    .get(assets);
+        if self.indirect_commands_buffer.data_len() == 0 {
+            return;
+        }
+        if self.indirect_commands_buffer.data_len() > self.indirect_commands_buffer.buf_len() {
+			panic!("Indirect commands buffer not up to date");
+		}
 
-                let set = DescriptorSet::new(
-                    self.gpu.desc_alloc.clone(),
-                    pipeline.layout().set_layouts().get(0).unwrap().clone(),
-                    [WriteDescriptorSet::image_view_sampler(
-                        1,
-                        texture.image.clone(),
-                        texture.sampler.clone(),
-                    )],
-                    [],
+        let texture: Arc<Texture> = AssetHandle::default().get(assets);
+        let buffers_guard = MESH_BUFFERS.lock();
+        let mesh_buffers = buffers_guard.as_ref().unwrap();
+
+        let set = DescriptorSet::new(
+            self.gpu.desc_alloc.clone(),
+            pipeline.layout().set_layouts().get(0).unwrap().clone(),
+            [WriteDescriptorSet::image_view_sampler(
+                1,
+                texture.image.clone(),
+                texture.sampler.clone(),
+            )],
+            [],
+        )
+        .unwrap();
+        builder
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                pipeline.layout().clone(),
+                0,
+                set.clone(),
+            )
+            .unwrap()
+            .bind_vertex_buffers(
+                0,
+                (
+                    mesh_buffers.vertex_buffer.buf(),
+                    mesh_buffers.tex_coord_buffer.buf(),
+                    mesh_buffers.normal_buffer.buf(),
+                    self.mvp_buffer.buf().clone(),
+                ),
+            )
+            .unwrap()
+            .bind_index_buffer(mesh_buffers.index_buffer.buf())
+            .unwrap();
+        unsafe {
+            builder
+                .draw_indexed_indirect(
+                    self.indirect_commands_buffer
+                        .buf()
+                        .slice(0..self.indirect_commands_buffer.data_len() as u64),
                 )
                 .unwrap();
-
-                let offset = self
-                    .model_indirect_buffer
-                    .get_data(*ind_idx as usize)
-                    .unwrap()
-                    .offset
-                    + i as u32;
-                builder
-                    .bind_descriptor_sets(
-                        PipelineBindPoint::Graphics,
-                        pipeline.layout().clone(),
-                        0,
-                        set.clone(),
-                    )
-                    .unwrap()
-                    .bind_vertex_buffers(
-                        0,
-                        (
-                            mesh.vertex_buffer.clone(),
-                            mesh.tex_coord_buffer.clone(),
-                            mesh.normal_buffer.clone(),
-                            self.mvp_buffer.buf().clone(),
-                        ),
-                    )
-                    .unwrap()
-                    .bind_index_buffer(mesh.index_buffer.clone())
-                    .unwrap();
-                unsafe {
-                    builder
-                        .draw_indexed_indirect(
-                            self.indirect_commands_buffer
-                                .buf()
-                                .slice((offset as u64)..(offset + 1) as u64),
-                        )
-                        .unwrap();
-                }
-            }
         }
     }
 }

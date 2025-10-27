@@ -1,0 +1,1 @@
+transform compute should be run in render thread with previous frame clean up

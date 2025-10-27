@@ -39,10 +39,13 @@ use std::{
 };
 use transform::{TransformHierarchy, compute::TransformCompute};
 use vulkano::{
+    Validated, VulkanError,
     command_buffer::{
         AutoCommandBufferBuilder, BlitImageInfo, CommandBufferUsage, CopyBufferInfo,
         PrimaryAutoCommandBuffer,
-    }, swapchain::{acquire_next_image, SwapchainAcquireFuture, SwapchainPresentInfo}, sync::{self, GpuFuture}, Validated, VulkanError
+    },
+    swapchain::{SwapchainAcquireFuture, SwapchainPresentInfo, acquire_next_image},
+    sync::{self, GpuFuture},
 };
 use winit::{
     application::ApplicationHandler,
@@ -56,6 +59,7 @@ use crate::{
     asset_manager::{Asset, AssetHandle},
     component::{Component, ComponentStorage, Scene},
     engine::Engine,
+    obj_loader::{MESH_BUFFERS, MeshBuffers},
     renderer::{_RendererComponent, RendererComponent, RenderingSystem},
     transform::{_Transform, Transform, compute::PerfCounter},
     util::container::Container,
@@ -93,7 +97,7 @@ const MAX_FRAMES_IN_FLIGHT: u32 = 4;
 // 1 << 21 = 2,097,152
 // 1 << 22 = 4,194,304
 // 1 << 23 = 8,388,608
-const NUM_CUBES: usize = 1;
+const NUM_CUBES: usize = 0;
 struct FPS {
     frame_times: std::collections::VecDeque<f32>,
     frame_ages: std::collections::VecDeque<time::Instant>,
@@ -190,6 +194,7 @@ impl App {
             env::set_var("RUST_BACKTRACE", "1");
         }
         let gpu = gpu_manager::GPUManager::new(event_loop);
+        *MESH_BUFFERS.lock() = Some(MeshBuffers::new(&gpu));
         // let vertices = [
         //     MyVertex {
         //         position: [-0.5 / 10.0, -0.25 / 10.0],
@@ -286,30 +291,30 @@ impl App {
                 .rendering_system
                 .lock()
                 .get_or_register_model_handle(cube.clone());
-            let __world = _world.clone();
+            // let __world = _world.clone();
+            // let a = asset_manager.load_asset::<Scene>(
+            //     "assets/bismark_low_poly2.glb",
+            //     Some(Box::new(move |handle, arc_asset| {
+            //         __world.lock().instantiate(&arc_asset);
+            //     })),
+            // );
+            // bismarck_handle = Some(a);
+            // let _world = world.clone();
+            // let ready = Arc::new(AtomicBool::new(false));
+            // let _ready = ready.clone();
             let a = asset_manager.load_asset::<Scene>(
-                "assets/bismark_low_poly2.glb",
+                "assets/OopsWholePlane1.glb",
                 Some(Box::new(move |handle, arc_asset| {
-                    __world.lock().instantiate(&arc_asset);
+                    // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
+                    _world.lock().instantiate(&arc_asset);
                 })),
             );
-            bismarck_handle = Some(a);
-            // let _world = world.clone();
-            //          let ready = Arc::new(AtomicBool::new(false));
-            //          let _ready = ready.clone();
-            //          let a = asset_manager.load_asset::<Scene>(
-            // 	"assets/OopsWholePlane1.glb",
-            // 	Some(Box::new(move |handle, arc_asset| {
-            // 		_ready.store(true, std::sync::atomic::Ordering::SeqCst);
-            // 		_world.lock().instantiate(&arc_asset);
-            // 	})),
-            // );
             //          while !ready.load(std::sync::atomic::Ordering::SeqCst) {
             // 	asset_manager.process_deferred_queue();
             // 	gpu.process_work_queue();
             // }
             // println!("Loaded B-52");
-            // b52_handle = Some(a);
+            b52_handle = Some(a);
             //          while Arc::ptr_eq(
             // 	&a.get(&asset_manager),
             // 	&scene_placeholder,
@@ -401,8 +406,9 @@ impl App {
             // });
         });
 
-        let (renderdata_snd, renderdata_rcv) =
-            std::sync::mpsc::sync_channel::<render_thread::RenderData>(MAX_FRAMES_IN_FLIGHT as usize);
+        let (renderdata_snd, renderdata_rcv) = std::sync::mpsc::sync_channel::<
+            render_thread::RenderData,
+        >(MAX_FRAMES_IN_FLIGHT as usize);
         let _gpu = gpu.clone();
         rayon::spawn(move || {
             render_thread::render_thread_main(_gpu, renderdata_rcv);
@@ -508,7 +514,7 @@ impl ApplicationHandler for App {
         }
         let rcx = self.rcxs.get_mut(&_window_id).unwrap();
 
-        rcx.gui.update(&event);
+        rcx.gui.lock().update(&event);
         match event {
             WindowEvent::CursorMoved {
                 device_id,
@@ -633,7 +639,8 @@ impl ApplicationHandler for App {
                 //         rcx.command_buffer.as_ref().unwrap().clone(),
                 //     )
                 //     .unwrap();
-                self.commands.push(rcx.command_buffer.as_ref().unwrap().clone());
+                self.commands
+                    .push(rcx.command_buffer.as_ref().unwrap().clone());
                 rcx.extra_perfs.get_mut("join and execute").unwrap().stop();
                 // blit to swapchain image
                 let mut builder = self
@@ -674,17 +681,20 @@ impl ApplicationHandler for App {
                 //     )
                 //     .then_signal_fence_and_flush();
                 let render_data = render_thread::RenderData {
-					image_num: image_index,
-					aquire_future: acquire_future,
-					commands: self.commands.drain(..).collect(),
-					swapchain: rcx.swapchain.clone(),
-				};
+                    image_num: image_index,
+                    aquire_future: acquire_future,
+                    commands: self.commands.drain(..).collect(),
+                    swapchain: rcx.swapchain.clone(),
+                    gui: rcx.gui.clone(),
+                    image_view: rcx.attachment_image_views[image_index as usize].clone(),
+                    fps: self.fps.frame_times.len() as f32 / self.fps.time_sum,
+                };
                 match self.render_thread_snd.send(render_data) {
-					Ok(_) => {},
-					Err(e) => {
-						println!("Error sending render data to render thread: {}", e);
-					}
-				}
+                    Ok(_) => {}
+                    Err(e) => {
+                        println!("Error sending render data to render thread: {}", e);
+                    }
+                }
                 rcx.extra_perfs
                     .get_mut("signal fence and flush")
                     .unwrap()
@@ -750,6 +760,11 @@ impl ApplicationHandler for App {
         let mut builder = self
             .gpu
             .create_command_buffer(CommandBufferUsage::OneTimeSubmit);
+        let mesh_resized = MESH_BUFFERS
+            .lock()
+            .as_mut()
+            .unwrap()
+            .upload(&self.gpu, &mut builder);
 
         // let transform_hierarchy = &mut self.world.lock().transform_hierarchy;
         let (updated, staging_buffer_index) = self.transform_compute.update_transforms(
@@ -785,8 +800,10 @@ impl ApplicationHandler for App {
         let command_buffer = builder.build().unwrap();
 
         self.commands.push(command_buffer);
-        self.commands.push(self.transform_compute.command_buffer[staging_buffer_index].clone());
-		self.commands.push(rendering_system.command_buffer.as_ref().unwrap().clone());
+        self.commands
+            .push(self.transform_compute.command_buffer[staging_buffer_index].clone());
+        self.commands
+            .push(rendering_system.command_buffer.as_ref().unwrap().clone());
 
         // execute buffer copies and global compute shaders
         // self.frames_in_flight[self.current_frame] = Some(
@@ -818,6 +835,7 @@ impl ApplicationHandler for App {
             .load(std::sync::atomic::Ordering::SeqCst)
             || updated
             || renderer_updated
+            || mesh_resized
         {
             for (_window_id, rcx) in self.rcxs.iter_mut() {
                 rcx.command_buffer = None;

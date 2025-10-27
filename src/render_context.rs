@@ -10,24 +10,14 @@ use vulkano::{
     },
     descriptor_set::{self, DescriptorSet, WriteDescriptorSet},
     format::Format,
-    image::{Image, ImageCreateInfo, ImageType, ImageUsage, view::ImageView},
+    image::{view::ImageView, Image, ImageCreateInfo, ImageType, ImageUsage},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
     pipeline::{
-        DynamicState, GraphicsPipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
         graphics::{
-            GraphicsPipelineCreateInfo,
-            color_blend::{ColorBlendAttachmentState, ColorBlendState},
-            depth_stencil::{DepthState, DepthStencilState},
-            input_assembly::InputAssemblyState,
-            multisample::MultisampleState,
-            rasterization::RasterizationState,
-            subpass::PipelineRenderingCreateInfo,
-            vertex_input::{Vertex, VertexDefinition},
-            viewport::{Viewport, ViewportState},
-        },
-        layout::PipelineDescriptorSetLayoutCreateInfo,
+            color_blend::{ColorBlendAttachmentState, ColorBlendState}, depth_stencil::{DepthState, DepthStencilState}, input_assembly::InputAssemblyState, multisample::MultisampleState, rasterization::RasterizationState, subpass::PipelineRenderingCreateInfo, vertex_input::{Vertex, VertexDefinition}, viewport::{Viewport, ViewportState}, GraphicsPipelineCreateInfo
+        }, layout::PipelineDescriptorSetLayoutCreateInfo, DynamicState, GraphicsPipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo
     },
-    render_pass::{AttachmentLoadOp, AttachmentStoreOp},
+    render_pass::{AttachmentLoadOp, AttachmentStoreOp, Subpass},
     swapchain::{Surface, Swapchain, SwapchainCreateInfo},
     sync::{self, GpuFuture},
 };
@@ -51,7 +41,7 @@ pub struct RenderContext {
     pub viewport: Viewport,
     pub recreate_swapchain: bool,
     // pub previous_frame_end: Option<Box<dyn GpuFuture>>,
-    pub gui: Gui,
+    pub gui: Arc<Mutex<Gui>>,
     pub gui_drawn: bool,
     pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
     // pub image_view: Arc<ImageView>,
@@ -217,6 +207,15 @@ impl RenderContext {
             },
         );
 
+        // let mut gui = Gui::new_with_subpass(
+        //     &event_loop,
+        //     surface.clone(),
+        //     gpu.queue.clone(),
+        //     Subpass::from(render),
+        //     gpu.surface_format,
+        //     GuiConfig::default(),
+        // );
+
         RenderContext {
             window,
             swapchain,
@@ -226,7 +225,7 @@ impl RenderContext {
             viewport,
             recreate_swapchain,
             // previous_frame_end,
-            gui,
+            gui: Arc::new(Mutex::new(gui)),
             gui_drawn: false,
             command_buffer: None,
             camera,

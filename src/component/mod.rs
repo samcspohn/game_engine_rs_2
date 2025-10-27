@@ -198,7 +198,7 @@ where
                                 break;
                             }
                             let component = self._get_unchecked(current_idx as u32);
-                            let transform = transform_hierarchy.get_transform(current_idx as u32);
+                            let transform = transform_hierarchy.get_transform_unchecked(current_idx as u32);
                             {
                                 let mut component_guard = component.lock();
                                 f(&mut *component_guard, &transform);
@@ -373,7 +373,7 @@ impl Scene {
     where
         T: Component + Clone + Send + Sync + 'static,
     {
-        let t = self.transform_hierarchy.get_transform(entity.id);
+        let t = self.transform_hierarchy.get_transform_unchecked(entity.id);
         component.init(&t, &self.engine);
         self.components
             .get_storage_mut::<T>()
@@ -388,7 +388,7 @@ impl Scene {
         if let Some(storage) = self.components.get_storage_mut::<T>() {
             if let Some(component_mutex) = storage.get(entity.id) {
                 let mut component = component_mutex.lock();
-                let t = self.transform_hierarchy.get_transform(entity.id);
+                let t = self.transform_hierarchy.get_transform_unchecked(entity.id);
                 component.deinit(&t, &self.engine);
             }
             storage.delete(entity.id);
@@ -463,7 +463,7 @@ impl Scene {
                         component.init(
                             &self
                                 .transform_hierarchy
-                                .get_transform(*entity_map.get(&t_idx).unwrap()),
+                                .get_transform_unchecked(*entity_map.get(&t_idx).unwrap()),
                             &self.engine,
                         );
                         self_storage.set(*entity_map.get(&t_idx).unwrap(), component);
@@ -479,12 +479,12 @@ impl Scene {
                             &self.engine,
                             &self
                                 .transform_hierarchy
-                                .get_transform(*entity_map.get(&t_idx).unwrap()),
+                                .get_transform_unchecked(*entity_map.get(&t_idx).unwrap()),
                         );
                     }
                 }
             }
         }
-        self.transform_hierarchy.get_transform(entity_map[&0])
+        self.transform_hierarchy.get_transform_unchecked(entity_map[&0])
     }
 }

@@ -1,7 +1,7 @@
 use std::{
     path::Path,
     sync::{
-        Arc,
+        Arc, LazyLock,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
 };
@@ -11,7 +11,7 @@ use vulkano::buffer::{BufferUsage, Subbuffer};
 
 use crate::{
     asset_manager::{Asset, AssetHandle, DeferredAssetQueue},
-    gpu_manager::{GPUManager, GPUWorkQueue},
+    gpu_manager::{GPUManager, GPUWorkQueue, gpu_vec::GpuVec},
     texture::Texture,
 };
 
@@ -22,6 +22,68 @@ pub struct Model {
     pub meshes: Vec<Mesh>,
 }
 
+pub struct MeshBuffers {
+    pub vertex_buffer: GpuVec<[f32; 3]>,
+    pub normal_buffer: GpuVec<[f32; 3]>,
+    pub tex_coord_buffer: GpuVec<[f32; 2]>,
+    pub index_buffer: GpuVec<u32>,
+}
+
+impl MeshBuffers {
+    pub fn new(gpu: &GPUManager) -> Self {
+        Self {
+            vertex_buffer: GpuVec::new(gpu, BufferUsage::VERTEX_BUFFER, true),
+            normal_buffer: GpuVec::new(gpu, BufferUsage::VERTEX_BUFFER, true),
+            tex_coord_buffer: GpuVec::new(gpu, BufferUsage::VERTEX_BUFFER, true),
+            index_buffer: GpuVec::new(gpu, BufferUsage::INDEX_BUFFER, true),
+        }
+    }
+    pub fn upload(
+        &mut self,
+        gpu: &GPUManager,
+        builder: &mut vulkano::command_buffer::AutoCommandBufferBuilder<
+            vulkano::command_buffer::PrimaryAutoCommandBuffer,
+        >,
+    ) -> bool {
+        self.vertex_buffer.upload_delta(gpu, builder)
+            | self.normal_buffer.upload_delta(gpu, builder)
+            | self.tex_coord_buffer.upload_delta(gpu, builder)
+            | self.index_buffer.upload_delta(gpu, builder)
+    }
+
+    pub fn add_mesh(
+        &mut self,
+        vertices: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        tex_coords: &[[f32; 2]],
+        indices: &[u32],
+    ) -> (u32, u32) {
+        if self.vertex_buffer.data_len() > u32::MAX as usize {
+            panic!("Exceeded maximum number of vertices in MeshBuffers");
+        }
+        if self.index_buffer.data_len() > u32::MAX as usize {
+			panic!("Exceeded maximum number of indices in MeshBuffers");
+		}
+        let vertex_offset = self.vertex_buffer.data_len() as u32;
+        let index_offset = self.index_buffer.data_len() as u32;
+        for v in vertices {
+            self.vertex_buffer.push_data(*v);
+        }
+        for n in normals {
+            self.normal_buffer.push_data(*n);
+        }
+        for t in tex_coords {
+            self.tex_coord_buffer.push_data(*t);
+        }
+        for i in indices {
+            self.index_buffer.push_data(*i);
+        }
+        (vertex_offset, index_offset)
+    }
+}
+
+pub static MESH_BUFFERS: LazyLock<Mutex<Option<MeshBuffers>>> = LazyLock::new(|| Mutex::new(None));
+
 #[derive(Debug, Clone)]
 pub struct Mesh {
     pub vertices: Vec<[f32; 3]>,
@@ -29,12 +91,16 @@ pub struct Mesh {
     pub tex_coords: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
 
-    // buffers:
-    pub vertex_buffer: Subbuffer<[[f32; 3]]>,
-    pub normal_buffer: Subbuffer<[[f32; 3]]>,
-    pub tex_coord_buffer: Subbuffer<[[f32; 2]]>,
-    pub index_buffer: Subbuffer<[u32]>,
-    pub texture: Arc<Mutex<Option<AssetHandle<Texture>>>>,
+    // // buffers:
+    // pub vertex_buffer: Subbuffer<[[f32; 3]]>,
+    // pub normal_buffer: Subbuffer<[[f32; 3]]>,
+    // pub tex_coord_buffer: Subbuffer<[[f32; 2]]>,
+    // pub index_buffer: Subbuffer<[u32]>,
+    // pub texture: Arc<Mutex<Option<AssetHandle<Texture>>>>,
+
+    // global offsets for indirect drawing
+    pub vertex_offset: u32,
+    pub index_offset: u32,
 }
 
 impl Asset for Model {
@@ -107,79 +173,24 @@ impl Asset for Model {
             for index in mesh.indices {
                 indices.push(index);
             }
-
-            let verts = vertices.clone();
-            let norms = normals.clone();
-            let texs = tex_coords.clone();
-            let inds = indices.clone();
-
-            println!("Creating GPU buffers for OBJ");
-            let vertex_buffer = gpu
-                .enqueue_work(move |g| {
-                    g.buffer_from_iter(verts.iter().cloned(), BufferUsage::VERTEX_BUFFER)
-                })
-                .wait()
-                .unwrap();
-            println!("Created vertex buffer");
-            let normal_buffer = gpu
-                .enqueue_work(move |g| {
-                    g.buffer_from_iter(norms.iter().cloned(), BufferUsage::VERTEX_BUFFER)
-                })
-                .wait()
-                .unwrap();
-            println!("Created normal buffer");
-            let tex_coord_buffer = gpu
-                .enqueue_work(move |g| {
-                    g.buffer_from_iter(texs.iter().cloned(), BufferUsage::VERTEX_BUFFER)
-                })
-                .wait()
-                .unwrap();
-            println!("Created tex coord buffer");
-            let index_buffer = gpu
-                .enqueue_work(move |g| {
-                    g.buffer_from_iter(inds.iter().cloned(), BufferUsage::INDEX_BUFFER)
-                })
-                .wait()
-                .unwrap();
-            println!("Created index buffer");
-
-            let texture = Arc::new(Mutex::new(None));
-            if let Some(mat_id) = mesh.material_id.as_ref() {
-                if let Some(material) = materials.get(*mat_id) {
-                    if let Some(diffuse_texture) = material.diffuse_texture.clone() {
-                        println!("Loading diffuse texture for mesh: {:?}", diffuse_texture);
-                        let tex_path = if Path::new(&diffuse_texture).is_absolute() {
-                            diffuse_texture
-                        } else {
-                            let mut p = path.parent().unwrap_or(Path::new("")).to_path_buf();
-                            p.push(diffuse_texture);
-                            p.to_string_lossy().to_string()
-                        };
-                        let texture_clone = Arc::clone(&texture);
-                        asset.enqueue_work(move |a| {
-                            let handle = a.load_asset::<Texture>(&tex_path, None);
-                            *texture_clone.lock() = Some(handle.clone());
-                            handle
-                        });
-                    } else {
-                        println!("No diffuse texture for material {}", mat_id);
-                    }
-                } else {
-                    println!("Invalid material_id {} for mesh", mat_id);
-                }
+            let (vertex_offset, index_offset) = if let Some(buffers) = MESH_BUFFERS.lock().as_mut()
+            {
+                buffers.add_mesh(&vertices, &normals, &tex_coords, &indices)
             } else {
-                println!("No material assigned to mesh");
-            }
+                panic!("MESH_BUFFERS not initialized");
+            };
             let mesh = Mesh {
                 vertices,
                 normals,
                 tex_coords,
                 indices,
-                vertex_buffer,
-                normal_buffer,
-                tex_coord_buffer,
-                index_buffer,
-                texture,
+                vertex_offset,
+                index_offset,
+                // vertex_buffer,
+                // normal_buffer,
+                // tex_coord_buffer,
+                // index_buffer,
+                // texture,
             };
             meshes.push(mesh);
         }
@@ -220,23 +231,31 @@ impl Model {
         let tex_coords = vec![[0.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         let indices = vec![0, 1, 2];
 
-        let vertex_buffer =
-            gpu.buffer_from_iter(vertices.iter().cloned(), BufferUsage::VERTEX_BUFFER);
-        let normal_buffer =
-            gpu.buffer_from_iter(normals.iter().cloned(), BufferUsage::VERTEX_BUFFER);
-        let tex_coord_buffer =
-            gpu.buffer_from_iter(tex_coords.iter().cloned(), BufferUsage::VERTEX_BUFFER);
-        let index_buffer = gpu.buffer_from_iter(indices.iter().cloned(), BufferUsage::INDEX_BUFFER);
+        // let vertex_buffer =
+        //     gpu.buffer_from_iter(vertices.iter().cloned(), BufferUsage::VERTEX_BUFFER);
+        // let normal_buffer =
+        //     gpu.buffer_from_iter(normals.iter().cloned(), BufferUsage::VERTEX_BUFFER);
+        // let tex_coord_buffer =
+        //     gpu.buffer_from_iter(tex_coords.iter().cloned(), BufferUsage::VERTEX_BUFFER);
+        // let index_buffer = gpu.buffer_from_iter(indices.iter().cloned(), BufferUsage::INDEX_BUFFER);
+
+        let (vertex_offset, index_offset) = if let Some(buffers) = MESH_BUFFERS.lock().as_mut() {
+            buffers.add_mesh(&vertices, &normals, &tex_coords, &indices)
+        } else {
+            panic!("MESH_BUFFERS not initialized");
+        };
         let mesh = Mesh {
             vertices,
             normals,
             tex_coords,
             indices,
-            vertex_buffer,
-            normal_buffer,
-            tex_coord_buffer,
-            index_buffer,
-            texture: Arc::new(Mutex::new(None)),
+            vertex_offset,
+            index_offset,
+            // vertex_buffer,
+            // normal_buffer,
+            // tex_coord_buffer,
+            // index_buffer,
+            // texture: Arc::new(Mutex::new(None)),
         };
         Self { meshes: vec![mesh] }
     }

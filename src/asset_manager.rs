@@ -1,16 +1,22 @@
 use downcast_rs::{Downcast, DowncastSend, DowncastSync, impl_downcast};
 use parking_lot::Mutex;
 use std::{
-    any::{Any, TypeId}, cell::SyncUnsafeCell, collections::HashMap, ops::Mul, path::Path, sync::{
+    any::{Any, TypeId},
+    cell::SyncUnsafeCell,
+    collections::HashMap,
+    ops::Mul,
+    path::Path,
+    sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
-    }
+    },
 };
 use vulkano::buffer::BufferUsage;
 
 use crate::{
     gpu_manager::{GPUManager, GPUWorkQueue},
-    obj_loader::Model, renderer::RenderingSystem,
+    obj_loader::Model,
+    renderer::RenderingSystem,
 };
 
 // asset manager with asyncronous loading of assets
@@ -38,7 +44,8 @@ pub struct AssetWorkItem<T>
 where
     T: Asset + 'static,
 {
-    pub work: SyncUnsafeCell<Option<Box<dyn FnOnce(&mut AssetManager) -> AssetHandle<T> + Send + Sync>>>,
+    pub work:
+        SyncUnsafeCell<Option<Box<dyn FnOnce(&mut AssetManager) -> AssetHandle<T> + Send + Sync>>>,
     pub completed: AtomicBool,
     pub result: Mutex<Option<AssetHandle<T>>>,
 }
@@ -52,7 +59,7 @@ where
     }
     fn call(&self, asset_manager: &mut AssetManager) {
         // if let Ok(item) = Arc::try_unwrap(self) {
-            self._call(asset_manager);
+        self._call(asset_manager);
         // } else {
         //     panic!("Failed to unwrap Arc in AssetWorkItemBase::call");
         // }
@@ -128,12 +135,23 @@ pub struct AssetManager {
     pub deferred_queue: DeferredAssetQueue,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AssetHandle<T> {
     // asset: String,
     pub asset_id: u32,
     _marker: std::marker::PhantomData<T>,
 }
+
+impl<T> Clone for AssetHandle<T> {
+    fn clone(&self) -> Self {
+        Self {
+            // asset: self.asset.clone(),
+            asset_id: self.asset_id,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+impl<T> Copy for AssetHandle<T> {}
 
 impl<T> Default for AssetHandle<T>
 where
@@ -249,7 +267,12 @@ impl AssetManager {
         F: FnOnce(GPUWorkQueue, DeferredAssetQueue) -> Result<T, String> + Send + 'static,
     {
         let name_path = name_path.to_string();
-        if self.loaded_assets_files.lock().get(&TypeId::of::<T>()).is_some() {
+        if self
+            .loaded_assets_files
+            .lock()
+            .get(&TypeId::of::<T>())
+            .is_some()
+        {
             if let Some(id) = self
                 .loaded_assets_files
                 .lock()
@@ -285,7 +308,7 @@ impl AssetManager {
         let _r = self.renderer.clone();
 
         self.thread_pool.spawn(move || {
-            match f(gpu, deferred_queue) {
+            match f(gpu, deferred_queue.clone()) {
                 Ok(asset) => {
                     let arc_asset = Arc::new(asset);
                     let mut assets_lock = loaded_assets.lock();
@@ -293,11 +316,15 @@ impl AssetManager {
                     assets.insert(asset_id, arc_asset.clone());
                     rebuild_command_buffer.store(true, Ordering::SeqCst);
                     if type_id == TypeId::of::<Model>() {
-                        let asset_trait: Arc<dyn Asset> = arc_asset.clone();
-                        if let Ok(model_asset) = asset_trait.downcast_arc::<Model>() {
-                            println!("Registering model asset id {}", asset_id);
-                            _r.lock().register_model(AssetHandle::_from_id(asset_id), model_asset);
-                        }
+                        deferred_queue.enqueue_work(move |_a| {
+                            let asset_trait: Arc<dyn Asset> = arc_asset.clone();
+                            let handle = AssetHandle::_from_id(asset_id);
+                            if let Ok(model_asset) = asset_trait.downcast_arc::<Model>() {
+                                println!("Registering model asset id {}", asset_id);
+                                _r.lock().register_model(handle, model_asset);
+                            }
+                            handle
+                        });
                     }
                 }
                 Err(err) => {
@@ -363,7 +390,7 @@ impl AssetManager {
         let asset_id = ret.asset_id;
         let _r = self.renderer.clone();
         self.thread_pool.spawn(move || {
-            match T::load_from_file(&path, gpu, deferred_queue) {
+            match T::load_from_file(&path, gpu, deferred_queue.clone()) {
                 Ok(asset) => {
                     let arc_asset = Arc::new(asset);
                     let mut assets_lock = loaded_assets.lock();
@@ -374,18 +401,20 @@ impl AssetManager {
                         let asset_trait: Arc<dyn Asset> = arc_asset.clone();
                         if let Ok(model_asset) = asset_trait.downcast_arc::<Model>() {
                             println!("Registering model asset id {}", asset_id);
-                            _r.lock().register_model(AssetHandle::_from_id(asset_id), model_asset);
+                            _r.lock()
+                                .register_model(AssetHandle::_from_id(asset_id), model_asset);
                         }
                     }
                     if let Some(mut cb) = callbk {
-                        cb(
-                            AssetHandle {
+                        deferred_queue.enqueue_work(move |_a| {
+                            let handle = AssetHandle {
                                 // asset: path.to_string(),
                                 asset_id,
                                 _marker: std::marker::PhantomData,
-                            },
-                            arc_asset,
-                        );
+                            };
+                            cb(handle, arc_asset);
+                            handle
+                        });
                     }
                 }
                 Err(err) => {

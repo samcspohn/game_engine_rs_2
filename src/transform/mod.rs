@@ -462,18 +462,20 @@ impl TransformHierarchy {
         *r = rotation;
         self.mark_dirty(t, TransformComponent::Rotation);
     }
-    pub fn get_transform(&self, idx: u32) -> Transform<'_> {
-        // if (idx as usize) < self.mutexes.len() {
-        //     if self.get_active(idx) {
-        //         Some(Transform::new(self, idx))
-        //     } else {
-        //         None
-        //     }
-        // } else {
-        //     None
-        // }
+    pub fn get_transform_unchecked(&self, idx: u32) -> Transform<'_> {
         Transform::new(self, idx)
     }
+    pub fn get_transform(&self, idx: u32) -> Option<Transform<'_>> {
+		if (idx as usize) < self.mutexes.len() {
+			if self.get_active(idx) {
+				Some(Transform::new(self, idx))
+			} else {
+				None
+			}
+		} else {
+			None
+		}
+	}
     pub fn get_transform_(&self, idx: u32) -> _Transform {
         let guard = self._lock_internal(idx);
         _Transform {

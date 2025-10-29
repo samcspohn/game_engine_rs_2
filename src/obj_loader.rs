@@ -45,10 +45,12 @@ impl MeshBuffers {
             vulkano::command_buffer::PrimaryAutoCommandBuffer,
         >,
     ) -> bool {
-        self.vertex_buffer.upload_delta(gpu, builder)
-            | self.normal_buffer.upload_delta(gpu, builder)
-            | self.tex_coord_buffer.upload_delta(gpu, builder)
-            | self.index_buffer.upload_delta(gpu, builder)
+        let mut ret = false;
+        ret |= self.vertex_buffer.upload_delta(gpu, builder);
+        ret |= self.normal_buffer.upload_delta(gpu, builder);
+        ret |= self.tex_coord_buffer.upload_delta(gpu, builder);
+        ret |= self.index_buffer.upload_delta(gpu, builder);
+        ret
     }
 
     pub fn add_mesh(
@@ -62,8 +64,8 @@ impl MeshBuffers {
             panic!("Exceeded maximum number of vertices in MeshBuffers");
         }
         if self.index_buffer.data_len() > u32::MAX as usize {
-			panic!("Exceeded maximum number of indices in MeshBuffers");
-		}
+            panic!("Exceeded maximum number of indices in MeshBuffers");
+        }
         let vertex_offset = self.vertex_buffer.data_len() as u32;
         let index_offset = self.index_buffer.data_len() as u32;
         for v in vertices {

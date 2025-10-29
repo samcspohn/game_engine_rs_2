@@ -78,7 +78,7 @@ mat4 compute_model_matrix(vec3 position, vec4 rotation, vec3 scale) {
 // };
 
 mat4 get_global_matrix(uint index) {
-    if (index == -1) {
+    if (index == 0xFFFFFFFF) {
         return mat4(1.0);
     }
 
@@ -88,7 +88,7 @@ mat4 get_global_matrix(uint index) {
     uint parent_index = parent_indices[index];
     mat4 global_matrix = compute_model_matrix(position, rotation, scale);
     uint sanity_counter = 0;
-    while (parent_index != -1 && sanity_counter < 10) {
+    while (parent_index != 0xFFFFFFFF && sanity_counter < 100) {
         position = positions[parent_index];
         rotation = rotations[parent_index];
         scale = scales[parent_index];
@@ -149,9 +149,17 @@ void main() {
             if (idx >= pc.count) {
                 return;
             }
+            mat4 model_matrix = translate(positions[idx]) * rotate(rotations[idx]) * scale(scales[idx]);
+            uint parent = parent_indices[idx];
+            while (parent != 0xFFFFFFFF) {
+                model_matrix = translate(positions[parent]) * rotate(rotations[parent]) * scale(scales[parent]) * model_matrix;
+                parent = parent_indices[parent];
+            }
+            model_matrices[idx] = model_matrix;
+            // model_matrices[idx] = get_global_matrix(idx);
             // model_matrices[idx] =
             //     compute_model_matrix(positions[idx], rotations[idx], scales[idx]);
-            model_matrices[idx] = translate(positions[idx]) * rotate(rotations[idx]) * scale(scales[idx]);
+            // model_matrices[idx] = translate(positions[idx]) * rotate(rotations[idx]) * scale(scales[idx]);
         }
         break;
         default:

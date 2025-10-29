@@ -7,6 +7,7 @@ use std::{
 
 use glam::{Quat, Vec3};
 use parking_lot::Mutex;
+use rayon::prelude::*;
 use segvec::SegVec;
 
 use crate::util::Avail;
@@ -93,15 +94,15 @@ impl<'a> TransformGuard<'a> {
     pub fn shift(&self, delta: Vec3) {
         self.hierarchy.shift(&self, delta);
     }
-    // pub fn get_global_position(&self) -> Vec3 {
-    //     self.hierarchy.get_global_position(&self)
-    // }
-    // pub fn get_global_rotation(&self) -> Quat {
-    //     self.hierarchy.get_global_rotation(&self)
-    // }
-    // pub fn get_global_scale(&self) -> Vec3 {
-    //     self.hierarchy.get_global_scale(&self)
-    // }
+    pub fn get_global_position(&self) -> Vec3 {
+        self.hierarchy.get_global_position(&self)
+    }
+    pub fn get_global_rotation(&self) -> Quat {
+        self.hierarchy.get_global_rotation(&self)
+    }
+    pub fn get_global_scale(&self) -> Vec3 {
+        self.hierarchy.get_global_scale(&self)
+    }
 }
 #[repr(u8)]
 enum TransformComponent {
@@ -361,6 +362,9 @@ impl TransformHierarchy {
     fn _rotation(&self, idx: u32) -> &mut Quat {
         unsafe { &mut *self.rotations.get_unchecked(idx as usize).get() }
     }
+    fn _meta(&self, idx: u32) -> &mut TransformMeta {
+        unsafe { &mut *self.metadata.get_unchecked(idx as usize).get() }
+    }
     fn scale_by(&self, t: &TransformGuard, scale: Vec3) {
         let s = self._scale(t.idx as u32);
         *s *= scale;
@@ -369,10 +373,10 @@ impl TransformHierarchy {
     fn set_scale(&self, t: &TransformGuard, scale: Vec3) {
         let s = self._scale(t.idx as u32);
         *s = scale;
-        if self.get_has_children(t.idx as u32) {
-            let base_pos = self._position(t.idx as u32);
-            self.scale_children(t, scale, base_pos);
-        }
+        // if self.get_has_children(t.idx as u32) {
+        //     let base_pos = self._position(t.idx as u32);
+        //     self.scale_children(t, scale, base_pos);
+        // }
         self.mark_dirty(t, TransformComponent::Scale);
     }
     pub(crate) fn scale_children(&self, t: &TransformGuard, scale: Vec3, base_pos: &Vec3) {
@@ -384,18 +388,18 @@ impl TransformHierarchy {
             *s *= scale;
             *p = base_pos + (*p - base_pos) * scale;
             self.mark_dirty(&child, TransformComponent::Scale);
-            if self.get_has_children(child.idx as u32) {
-                self.scale_children(&child, scale, base_pos);
-            }
+            // if self.get_has_children(child.idx as u32) {
+            //     self.scale_children(&child, scale, base_pos);
+            // }
         }
     }
     fn shift(&self, t: &TransformGuard, delta: Vec3) {
         let p = self._position(t.idx as u32);
         *p += delta;
         self.mark_dirty(t, TransformComponent::Position);
-        if self.get_has_children(t.idx as u32) {
-            self.translate_children(t, delta);
-        }
+        // if self.get_has_children(t.idx as u32) {
+        //     self.translate_children(t, delta);
+        // }
     }
     fn translate_by(&self, t: &TransformGuard, translation: Vec3) {
         let p = self._position(t.idx as u32);
@@ -403,9 +407,9 @@ impl TransformHierarchy {
         let translation = *r * translation;
         *p += translation;
         self.mark_dirty(t, TransformComponent::Position);
-        if self.get_has_children(t.idx as u32) {
-            self.translate_children(t, translation);
-        }
+        // if self.get_has_children(t.idx as u32) {
+        //     self.translate_children(t, translation);
+        // }
     }
     pub(crate) fn translate_children(&self, t: &TransformGuard, translation: Vec3) {
         let children = self.get_children(t);
@@ -414,17 +418,17 @@ impl TransformHierarchy {
             let p = self._position(child.idx as u32);
             *p += translation;
             self.mark_dirty(&child, TransformComponent::Position);
-            if self.get_has_children(child.idx as u32) {
-                self.translate_children(&child, translation);
-            }
+            // if self.get_has_children(child.idx as u32) {
+            //     self.translate_children(&child, translation);
+            // }
         }
     }
     fn set_position(&self, t: &TransformGuard, position: Vec3) {
         let p = self._position(t.idx as u32);
-        if self.get_has_children(t.idx as u32) {
-            let delta = position.sub(*p);
-            self.translate_children(t, delta);
-        }
+        // if self.get_has_children(t.idx as u32) {
+        //     let delta = position.sub(*p);
+        //     self.translate_children(t, delta);
+        // }
         *p = position;
         self.mark_dirty(t, TransformComponent::Position);
     }
@@ -432,13 +436,14 @@ impl TransformHierarchy {
         let r = self._rotation(t.idx as u32);
         *r = rotation * *r;
         self.mark_dirty(t, TransformComponent::Rotation);
-        if self.get_has_children(t.idx as u32) {
-            self.rotate_children(t, rotation, *self._position(t.idx as u32));
-        }
+        // if self.get_has_children(t.idx as u32) {
+        //     self.rotate_children(t, rotation, *self._position(t.idx as u32));
+        // }
     }
     pub(crate) fn rotate_children(&self, t: &TransformGuard, rotation: Quat, position: Vec3) {
         let children = self.get_children(t);
-        for child in children {
+        children.par_iter().for_each(|child| {
+            // for child in chunk {
             let child = self._lock_internal(*child);
             let r = self._rotation(child.idx as u32);
             let p = self._position(child.idx as u32);
@@ -451,14 +456,15 @@ impl TransformHierarchy {
             if self.get_has_children(child.idx as u32) {
                 self.rotate_children(&child, rotation, position);
             }
-        }
+            // }
+        });
     }
     fn set_rotation(&self, t: &TransformGuard, rotation: Quat) {
         let r = self._rotation(t.idx as u32);
-        if self.get_has_children(t.idx as u32) {
-            let delta = rotation * r.conjugate();
-            self.rotate_children(t, delta, *self._position(t.idx as u32));
-        }
+        // if self.get_has_children(t.idx as u32) {
+        //     let delta = rotation * r.conjugate();
+        //     self.rotate_children(t, delta, *self._position(t.idx as u32));
+        // }
         *r = rotation;
         self.mark_dirty(t, TransformComponent::Rotation);
     }
@@ -466,16 +472,16 @@ impl TransformHierarchy {
         Transform::new(self, idx)
     }
     pub fn get_transform(&self, idx: u32) -> Option<Transform<'_>> {
-		if (idx as usize) < self.mutexes.len() {
-			if self.get_active(idx) {
-				Some(Transform::new(self, idx))
-			} else {
-				None
-			}
-		} else {
-			None
-		}
-	}
+        if (idx as usize) < self.mutexes.len() {
+            if self.get_active(idx) {
+                Some(Transform::new(self, idx))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
     pub fn get_transform_(&self, idx: u32) -> _Transform {
         let guard = self._lock_internal(idx);
         _Transform {
@@ -509,37 +515,69 @@ impl TransformHierarchy {
     fn get_meta(&self, t: &TransformGuard) -> &mut TransformMeta {
         unsafe { &mut *self.metadata[t.idx as usize].get() }
     }
-    // fn get_global_position(&self, t: &TransformGuard) -> Vec3 {
-    //     let mut global_position = self.get_position(t);
-    //     let mut _parent = self.get_parent(t);
-    //     while let Some(parent) = _parent {
-    //         let parent = self._lock_internal(parent);
-    //         let parent_position = self.get_position(&parent);
-    //         let parent_rotation = self.get_rotation(&parent);
-    //         global_position = parent_position + parent_rotation * global_position;
-    //         _parent = self.get_parent(&parent);
-    //     }
-    //     global_position
-    // }
-    // fn get_global_rotation(&self, t: &TransformGuard) -> Quat {
-    //     let mut global_rotation = self.get_rotation(t);
-    //     let mut _parent = self.get_parent(t);
-    //     while let Some(parent) = _parent {
-    //         let parent = self._lock_internal(parent);
-    //         let parent_rotation = self.get_rotation(&parent);
-    //         global_rotation = parent_rotation * global_rotation;
-    //         _parent = self.get_parent(&parent);
-    //     }
-    //     global_rotation
-    // }
-    // fn get_global_scale(&self, t: &TransformGuard) -> Vec3 {
-    //     let mut global_scale = self.get_scale(t);
-    //     let mut _parent = self.get_parent(t);
-    //     while let Some(parent) = _parent {
-    //         let parent_scale = self.get_scale(&self._lock_internal(parent));
-    //         global_scale *= parent_scale;
-    //         _parent = self.get_parent(&self._lock_internal(parent));
-    //     }
-    //     global_scale
-    // }
+    fn get_global_transform(&self, t: &TransformGuard) -> _Transform {
+        let mut global_position = self.get_position(t);
+        let mut global_rotation = self.get_rotation(t);
+        let mut global_scale = self.get_scale(t);
+        let mut parent = self._meta(t.idx as u32).parent;
+        while parent != u32::MAX {
+            let parent_position = self._position(parent);
+            let parent_rotation = self._rotation(parent);
+            let parent_scale = self._scale(parent);
+            global_position = *parent_position + (*parent_rotation * global_position) * *parent_scale;
+            global_rotation = *parent_rotation * global_rotation;
+            global_scale *= *parent_scale;
+            parent = self._meta(parent).parent;
+        }
+        _Transform {
+            position: global_position,
+            rotation: global_rotation,
+            scale: global_scale,
+            name: self.get_meta(t).name.clone(),
+            parent: None,
+        }
+    }
+
+    fn get_global_position(&self, t: &TransformGuard) -> Vec3 {
+        let mut global_position = self.get_position(t);
+        let mut parent = self._meta(t.idx as u32).parent;
+        // let mut _parent = self.get_parent(t);
+        // while let Some(parent) = _parent {
+        //     let parent = self._lock_internal(parent);
+        //     let parent_position = self.get_position(&parent);
+        //     let parent_rotation = self.get_rotation(&parent);
+        //     global_position = parent_position + parent_rotation * global_position;
+        //     _parent = self.get_parent(&parent);
+        // }
+        while parent != u32::MAX {
+            let parent_position = self._position(parent);
+            let parent_rotation = self._rotation(parent);
+            let parent_scale = self._scale(parent);
+            global_position =
+                *parent_position + (*parent_rotation * global_position) * *parent_scale;
+            parent = self._meta(parent).parent;
+        }
+        global_position
+    }
+    fn get_global_rotation(&self, t: &TransformGuard) -> Quat {
+        let mut global_rotation = self.get_rotation(t);
+        let mut _parent = self.get_parent(t);
+        while let Some(parent) = _parent {
+            let parent = self._lock_internal(parent);
+            let parent_rotation = self.get_rotation(&parent);
+            global_rotation = parent_rotation * global_rotation;
+            _parent = self.get_parent(&parent);
+        }
+        global_rotation
+    }
+    fn get_global_scale(&self, t: &TransformGuard) -> Vec3 {
+        let mut global_scale = self.get_scale(t);
+        let mut _parent = self.get_parent(t);
+        while let Some(parent) = _parent {
+            let parent_scale = self.get_scale(&self._lock_internal(parent));
+            global_scale *= parent_scale;
+            _parent = self.get_parent(&self._lock_internal(parent));
+        }
+        global_scale
+    }
 }

@@ -453,12 +453,12 @@ impl Scene {
                     if let Some(other_component_mutex) = other_storage.get(t_idx) {
                         let other_component = other_component_mutex.lock();
                         let model = other_component.model.clone();
-                        println!(
-                            "({} -> {}) m: {}",
-                            t_idx,
-                            entity_map.get(&t_idx).unwrap(),
-                            model.asset_id
-                        );
+                        // println!(
+                        //     "({} -> {}) m: {}",
+                        //     t_idx,
+                        //     entity_map.get(&t_idx).unwrap(),
+                        //     model.asset_id
+                        // );
                         let mut component = RendererComponent::new(model);
                         component.init(
                             &self

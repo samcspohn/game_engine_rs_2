@@ -143,6 +143,29 @@ where
         // self.data.resize(new_size, unsafe { std::mem::zeroed() });
         false
     }
+    pub fn resize_buffer_exact(
+        &mut self,
+        new_size: usize,
+        gpu: &GPUManager,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    ) -> bool {
+        self.size = new_size;
+        if new_size != self.buffer.len() as usize {
+            let buf = gpu.buffer_array(
+                new_size as u64,
+                MemoryTypeFilter::PREFER_DEVICE,
+                self.usage | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+            );
+            if self.persist {
+                builder
+                    .copy_buffer(CopyBufferInfo::buffers(self.buffer.clone(), buf.clone()))
+                    .unwrap();
+            }
+            self.buffer = buf;
+            return true;
+        }
+        false
+    }
     pub fn buf(&self) -> Subbuffer<[T]> {
         self.buffer.clone()
     }

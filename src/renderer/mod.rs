@@ -3,7 +3,7 @@ use std::{
     ops::Sub,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
 };
 
@@ -96,14 +96,14 @@ impl Component for RendererComponent {
         self.r_idx = e.rendering_system.lock().renderer(self.model.clone(), t);
     }
     fn deinit(&mut self, t: &Transform, e: &Engine) {
-        e.rendering_system
-            .lock()
-            .renderer_storage
-            .remove(self.r_idx);
-        e.rendering_system
-            .lock()
+        let mut rendering_system = e.rendering_system.lock();
+        rendering_system.renderer_storage.remove(self.r_idx);
+        rendering_system
             .renderer_uninits_buffer
             .push_data(self.r_idx);
+        rendering_system
+            .mvp_count
+            .fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -209,7 +209,7 @@ impl RenderingSystem {
         if !self.model_map.contains_key(&m_id) {
             // let interm_idx = self
             //     .intermediate_counter
-            //     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            //     .fetch_add(1, Ordering::SeqCst);
             let idx = self.model_indirect_buffer.data_len() as u32;
             self.model_indirect_buffer.push_data(cs::ModelIndirect {
                 offset: 0,
@@ -253,9 +253,9 @@ impl RenderingSystem {
         //         .and_modify(|c| *c += mesh_count * count)
         //         .or_insert(mesh_count * count);
         //     self.mvp_count
-        //         .fetch_sub(count, std::sync::atomic::Ordering::SeqCst);
+        //         .fetch_sub(count, Ordering::SeqCst);
         //     self.mvp_count
-        //         .fetch_add(mesh_count * count, std::sync::atomic::Ordering::SeqCst);
+        //         .fetch_add(mesh_count * count, Ordering::SeqCst);
         // }
         // let ind_idx = *self.indirect_map.get(&intermediate_idx).unwrap();
 
@@ -277,8 +277,8 @@ impl RenderingSystem {
             offset: indirect_offset,
             count: mesh_count,
         };
-        // self.model_registered
-        //     .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.model_registered
+            .store(true, Ordering::SeqCst);
         // self.command_buffer = None; // invalidate command buffer
     }
     // pub fn update_num_counts(&mut self, model: AssetHandle<Model>) {
@@ -290,7 +290,7 @@ impl RenderingSystem {
     //         .get_data(interm_id as usize)
     //         .map_or(1, |mi| mi.count);
     //     self.mvp_count
-    //         .fetch_add(count, std::sync::atomic::Ordering::SeqCst);
+    //         .fetch_add(count, Ordering::SeqCst);
     //     // self.indirect_counts
     //     //     .entry(ind_id)
     //     //     .and_modify(|c| *c += count)
@@ -302,9 +302,11 @@ impl RenderingSystem {
     // }
     pub fn renderer(&mut self, model: AssetHandle<Model>, transform: &Transform) -> u32 {
         let ind_id = self.get_or_register_model_handle(model.clone());
+        self.mvp_count
+            .fetch_add(1, Ordering::SeqCst);
         if self.used_model_set.insert(ind_id) {
             self.model_registered
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+                .store(true, Ordering::SeqCst);
         }
         // self.update_num_counts(model);
         let t_idx = transform.get_idx();
@@ -334,27 +336,33 @@ impl RenderingSystem {
     ) -> bool {
         let mut ret = false;
         let num_workgroups = self.indirect_commands_buffer.data_len().div_ceil(64).max(1) as u32;
-        ret |=
-            self.workgroup_sums_buffer
-                .resize_buffer(num_workgroups as usize, &self.gpu, builder);
-
+        ret |= self.workgroup_sums_buffer.resize_buffer_exact(
+            num_workgroups as usize,
+            &self.gpu,
+            builder,
+        );
+        // println!("ret/workgroup_sums: {}", ret);
         ret |= self.model_indirect_buffer.upload_delta(&self.gpu, builder);
+        // println!("ret/model_indirect: {}", ret);
 
         if self
             .model_registered
-            .load(std::sync::atomic::Ordering::SeqCst)
+            .load(Ordering::SeqCst)
         {
             ret |= self.model_indirect_buffer.force_update(&self.gpu, builder);
             self.model_registered
-                .store(false, std::sync::atomic::Ordering::SeqCst);
+                .store(false, Ordering::SeqCst);
         }
+        // println!("ret/model_indirect force: {}", ret);
 
         ret |= self
             .renderer_buffer
             .resize_buffer(self.renderer_storage.len(), &self.gpu, builder);
+        // println!("ret/renderer_buffer: {}", ret);
 
-        ret |= self.mvp_buffer.resize_buffer(1 << 21, &self.gpu, builder);
-        // println!("Renderer System: {} MVPs", self.mvp_count.load(std::sync::atomic::Ordering::SeqCst));
+        ret |= self.mvp_buffer.resize_buffer(self.mvp_count.load(Ordering::SeqCst) as usize, &self.gpu, builder);
+        // println!("ret/mvp_buffer: {}", ret);
+        // println!("Renderer System: {} MVPs", self.mvp_count.load(Ordering::SeqCst));
 
         let renderer_inits_len = self.renderer_inits_buffer.data_len();
         let renderer_uninits_len = self.renderer_uninits_buffer.data_len();
@@ -364,11 +372,14 @@ impl RenderingSystem {
             .upload_delta(&self.gpu, builder);
         self.renderer_inits_buffer.clear();
         self.renderer_uninits_buffer.clear();
+        // println!("ret/renderer_inits/uninits upload: {}", resized);
 
-        ret |= self.indirect_commands_buffer.data_len() >= self.indirect_commands_buffer.buf_len();
+        ret |= self.indirect_commands_buffer.data_len() > self.indirect_commands_buffer.buf_len();
+        // println!("ret/indirect_commands: {}", ret);
         ret |= self
             .indirect_commands_buffer
             .upload_delta(&self.gpu, builder);
+        // println!("ret/indirect_commands upload: {}", ret);
 
         if self.command_buffer.is_none() || ret || resized {
             let mut builder = self
@@ -403,7 +414,7 @@ impl RenderingSystem {
             .unwrap();
 
             let layout2 = self.pipeline.layout().set_layouts().get(2).unwrap();
-            let set2_s: Vec<_> = (0..7) // execute stage 4 (7) per camera
+            let set2_s: Vec<_> = (0..7) // stages 0-6 are per-frame, 7-8 are per-camera
                 .map(|i| {
                     DescriptorSet::new(
                         self.gpu.desc_alloc.clone(),
@@ -465,8 +476,8 @@ impl RenderingSystem {
                     pass,
                 };
             };
-            set_dispatch_stage(renderer_inits_len, 0, 0, 0); // stage 0, 0 init renderers
-            set_dispatch_stage(renderer_uninits_len, 1, 0, 1); // stage 0, 1 uninit renderers
+            set_dispatch_stage(renderer_uninits_len, 0, 0, 1); // stage 0, 1 uninit renderers FIRST
+            set_dispatch_stage(renderer_inits_len, 1, 0, 0); // stage 0, 0 init renderers AFTER
             set_dispatch_stage(self.indirect_commands_buffer.data_len(), 2, 1, 0); // stage 1 reset indirects
             set_dispatch_stage(self.renderer_storage.len(), 3, 2, 0); // stage 2 count instances
             set_dispatch_stage(self.indirect_commands_buffer.data_len(), 4, 3, 0); // stage 3, 0 prefix sum - local scan
@@ -558,8 +569,8 @@ impl RenderingSystem {
             return;
         }
         if self.indirect_commands_buffer.data_len() > self.indirect_commands_buffer.buf_len() {
-			panic!("Indirect commands buffer not up to date");
-		}
+            panic!("Indirect commands buffer not up to date");
+        }
 
         let texture: Arc<Texture> = AssetHandle::default().get(assets);
         let buffers_guard = MESH_BUFFERS.lock();

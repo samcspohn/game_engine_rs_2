@@ -4,7 +4,11 @@ use std::sync::mpsc::Receiver;
 use egui_winit_vulkano::Gui;
 use parking_lot::Mutex;
 use vulkano::{
-    command_buffer::PrimaryAutoCommandBuffer, image::view::ImageView, swapchain::{Swapchain, SwapchainAcquireFuture, SwapchainPresentInfo}, sync::{self, GpuFuture}, Validated
+    Validated,
+    command_buffer::PrimaryAutoCommandBuffer,
+    image::view::ImageView,
+    swapchain::{Swapchain, SwapchainAcquireFuture, SwapchainPresentInfo},
+    sync::{self, GpuFuture},
 };
 
 use crate::{MAX_FRAMES_IN_FLIGHT, gpu_manager::GPUManager};
@@ -40,12 +44,16 @@ pub fn render_thread_main(gpu: Arc<GPUManager>, render_receiver: Receiver<Render
                 //     rd.image_num,
                 //     frames_in_flight.len()
                 // );
-                frames_in_flight[frame_index]
-                    .as_mut()
-                    .unwrap()
-                    .cleanup_finished();
-                let mut after_cmd_future: Box<dyn GpuFuture> = frames_in_flight
-                    [frame_index]
+                for i in 0..frames_in_flight.len() {
+                    // if i != frame_index {
+                    frames_in_flight[i].as_mut().unwrap().cleanup_finished();
+                    // }
+                }
+                // frames_in_flight[frame_index]
+                //     .as_mut()
+                //     .unwrap()
+                //     .cleanup_finished();
+                let mut after_cmd_future: Box<dyn GpuFuture> = frames_in_flight[frame_index]
                     .take()
                     .unwrap()
                     .join(rd.aquire_future)
@@ -59,19 +67,24 @@ pub fn render_thread_main(gpu: Arc<GPUManager>, render_receiver: Receiver<Render
                         .boxed();
                     // frames_in_flight[command.image_num as usize] = Some(after_cmd_future.boxed());
                 }
-    //             {
-				// 	let mut gui = rd.gui.lock();
-				// 	gui.immediate_ui(|gui| {
-				// 		let ctx = gui.context();
-				// 		egui::Window::new("fps").show(&ctx, |ui| {
-				// 			ui.label(format!("{:.2} fps", rd.fps));
-				// 		});
-				// 	});
-				// 	after_cmd_future = gui.draw_on_image(
-				// 		after_cmd_future,
-				// 		rd.image_view.clone(),
-				// 	);
-				// }
+                //             {
+                // 	let mut gui = rd.gui.lock();
+                // 	gui.immediate_ui(|gui| {
+                // 		let ctx = gui.context();
+                // 		egui::Window::new("fps").show(&ctx, |ui| {
+                // 			ui.label(format!("{:.2} fps", rd.fps));
+                // 		});
+                // 	});
+                // 	after_cmd_future = gui.draw_on_image(
+                // 		after_cmd_future,
+                // 		rd.image_view.clone(),
+                // 	);
+                // }
+                for i in 0..frames_in_flight.len() {
+                    if i != frame_index {
+                        frames_in_flight[i].as_mut().unwrap().cleanup_finished();
+                    }
+                }
                 let future = after_cmd_future
                     .then_swapchain_present(
                         gpu.queue.clone(),
@@ -81,6 +94,11 @@ pub fn render_thread_main(gpu: Arc<GPUManager>, render_receiver: Receiver<Render
                         ),
                     )
                     .then_signal_fence_and_flush();
+                for i in 0..frames_in_flight.len() {
+                    if i != frame_index {
+                        frames_in_flight[i].as_mut().unwrap().cleanup_finished();
+                    }
+                }
 
                 match future.map_err(Validated::unwrap) {
                     Ok(future) => {
@@ -88,26 +106,29 @@ pub fn render_thread_main(gpu: Arc<GPUManager>, render_receiver: Receiver<Render
                     }
                     Err(e) => {
                         eprintln!("Failed to flush future: {:?}", e);
-                        frames_in_flight[frame_index] =
-                            Some(sync::now(gpu.device.clone()).boxed());
+                        frames_in_flight[frame_index] = Some(sync::now(gpu.device.clone()).boxed());
                     }
                 }
-                let prev_frame_index = (frame_index - 1) % MAX_FRAMES_IN_FLIGHT as usize;
-                frames_in_flight[prev_frame_index]
-					.as_mut()
-					.unwrap()
-					.cleanup_finished();
+                //            let prev_frame_index = frame_index.wrapping_sub(1) % MAX_FRAMES_IN_FLIGHT as usize;
+                //            frames_in_flight[prev_frame_index]
+                // .as_mut()
+                // .unwrap()
+                // .cleanup_finished();
+                for i in 0..frames_in_flight.len() {
+                    if i != frame_index {
+                        frames_in_flight[i].as_mut().unwrap().cleanup_finished();
+                    }
+                }
                 frame_index = (frame_index + 1) % MAX_FRAMES_IN_FLIGHT as usize;
-                // for i in 0..frames_in_flight.len() {
-                //     if i != rd.image_num as usize {
-                //         frames_in_flight[i].as_mut().unwrap().cleanup_finished();
-                //     }
-                // }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                // for frame_future in frames_in_flight.iter_mut() {
-                //     if let Some(future) = frame_future {
-                //         future.cleanup_finished();
+                for frame_future in frames_in_flight.iter_mut() {
+                    frame_future.as_mut().unwrap().cleanup_finished();
+                }
+                // let prev_frame_index = frame_index.wrapping_sub(1) % MAX_FRAMES_IN_FLIGHT as usize;
+                // for i in 0..frames_in_flight.len() {
+                //     if i != prev_frame_index {
+                //         frames_in_flight[i].as_mut().unwrap().cleanup_finished();
                 //     }
                 // }
                 // std::thread::yield_now();

@@ -207,6 +207,7 @@ impl Debug for PerfCounter {
 
 pub struct PerfCounters {
     pub allocate_bufs: PerfCounter,
+    pub aquire_bufs: PerfCounter,
     pub update_bufs: PerfCounter,
     pub compute: PerfCounter,
     pub update_parents: PerfCounter,
@@ -262,12 +263,13 @@ impl TransformCompute {
                 MemoryTypeFilter::PREFER_DEVICE,
                 BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
             ),
-            staging_buffers: (0..MAX_FRAMES_IN_FLIGHT * 2)
+            staging_buffers: (0..MAX_FRAMES_IN_FLIGHT + 1)
                 .map(|_| TransformUpdateBuffers::new(gpu))
                 .collect(),
             staging_buffer_index: 0,
             perf_counters: PerfCounters {
                 allocate_bufs: PerfCounter::new(),
+                aquire_bufs: PerfCounter::new(),
                 update_bufs: PerfCounter::new(),
                 compute: PerfCounter::new(),
                 update_parents: PerfCounter::new(),
@@ -424,10 +426,12 @@ impl TransformCompute {
             //     }
             //     // gpu_future.cleanup_finished();
             // };
+            self.perf_counters.aquire_bufs.start();
             let pos_cell = SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].position));
             let rot_cell = SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].rotation));
             let scale_cell = SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].scale));
             let flags_cell = SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].flags));
+            self.perf_counters.aquire_bufs.stop();
             // let dirty_l2 = SyncUnsafeCell::new(self.staging_buffers[sbi].dirty_l2.write().unwrap());
             let _hierarchy = SyncUnsafeCell::new(hierarchy);
 

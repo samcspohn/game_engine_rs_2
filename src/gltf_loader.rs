@@ -3,7 +3,7 @@ use std::{fs::File, sync::Arc};
 use glam::Vec3;
 use gltf::{Glb, Gltf, Semantic, buffer};
 use parking_lot::Mutex;
-use vulkano::buffer::BufferUsage;
+use rayon::prelude::*;
 
 use crate::{
     asset_manager::{Asset, DeferredAssetQueue},
@@ -16,20 +16,18 @@ use crate::{
 
 pub static mut ENGINE: Option<Arc<Engine>> = None;
 
-
-
 fn recursive_access_node(
     node: &gltf::Node,
     parent: Option<u32>,
     depth: usize,
-    scene: &mut crate::component::Scene,
+    scene: &Mutex<crate::component::Scene>,
     assets: &DeferredAssetQueue,
     buffers: &Vec<buffer::Data>,
     images: &Vec<gltf::image::Data>,
     file_path: &str,
 ) {
     let indent = "  ".repeat(depth);
-    println!("{}Node: {:?}", indent, node.name());
+    // println!("{}Node: {:?}", indent, node.name());
     let decomposed = node.transform().decomposed();
 
     // Local transform from GLTF
@@ -37,37 +35,45 @@ fn recursive_access_node(
     let local_rotation = glam::Quat::from_array(decomposed.1);
     let local_scale: Vec3 = decomposed.2.into();
 
-    // Compute global transform by combining with parent
-    let (global_position, global_rotation, global_scale) = if let Some(parent_id) = parent {
-        let parent_transform = scene.transform_hierarchy.get_transform_unchecked(parent_id);
-        let parent_guard = parent_transform.lock();
+    // // Compute global transform by combining with parent
+    // let (global_position, global_rotation, global_scale) = if let Some(parent_id) = parent {
+    //     let scene = scene.lock();
+    //     let parent_transform = scene.transform_hierarchy.get_transform_unchecked(parent_id);
+    //     let parent_guard = parent_transform.lock();
 
-        let parent_pos = parent_guard.get_position();
-        let parent_rot = parent_guard.get_rotation();
-        let parent_scale = parent_guard.get_scale();
+    //     let parent_pos = parent_guard.get_position();
+    //     let parent_rot = parent_guard.get_rotation();
+    //     let parent_scale = parent_guard.get_scale();
 
-        // Compute global transform: GlobalChild = ParentGlobal * LocalChild
-        let global_scale = parent_scale * local_scale;
-        let global_rotation = parent_rot * local_rotation;
-        let global_position = parent_pos + parent_rot * (local_position * parent_scale);
+    //     // Compute global transform: GlobalChild = ParentGlobal * LocalChild
+    //     let global_scale = parent_scale * local_scale;
+    //     let global_rotation = parent_rot * local_rotation;
+    //     let global_position = parent_pos + parent_rot * (local_position * parent_scale);
 
-        (global_position, global_rotation, global_scale)
-    } else {
-        // Root node - local transform IS the global transform
-        (local_position, local_rotation, local_scale)
-    };
+    //     (global_position, global_rotation, global_scale)
+    // } else {
+    //     // Root node - local transform IS the global transform
+    //     (local_position, local_rotation, local_scale)
+    // };
 
+    // let t = _Transform {
+    //     position: global_position,
+    //     rotation: global_rotation,
+    //     scale: global_scale,
+    //     name: node.name().unwrap_or("").to_string(),
+    //     parent: Some(parent.unwrap_or(0)),
+    // };
     let t = _Transform {
-        position: global_position,
-        rotation: global_rotation,
-        scale: global_scale,
-        name: node.name().unwrap_or("").to_string(),
-        parent,
-    };
-    let entity = scene.new_entity(t);
+		position: local_position,
+		rotation: local_rotation,
+		scale: local_scale,
+		name: node.name().unwrap_or("").to_string(),
+		parent: Some(parent.unwrap_or(0)),
+	};
+    let entity = scene.lock().new_entity(t);
 
     if let Some(mesh) = node.mesh() {
-        println!("{} ^-Mesh: {:?}", indent, mesh.name());
+        // println!("{} ^-Mesh: {:?}", indent, mesh.name());
         let mut vertices = Vec::new();
         let mut normals = Vec::new();
         let mut tex_coords = Vec::new();
@@ -100,7 +106,7 @@ fn recursive_access_node(
 
             // Read indices and offset them by the base vertex index
             if let Some(indices_iter) = reader.read_indices() {
-            	indices.extend(indices_iter.into_u32().map(|idx| idx + base_vertex));
+                indices.extend(indices_iter.into_u32().map(|idx| idx + base_vertex));
             }
             for attribute in primitive.attributes() {
                 // println!("{}    Attribute {:?} {:?}", indent, attribute.0, attribute.1.index());
@@ -118,7 +124,7 @@ fn recursive_access_node(
                         println!("{}    Extra Attribute: {:?}", indent, extra);
                     }
                     _ => {
-                        println!("{}    Unhandled Attribute: {:?}", indent, attribute.0);
+                        // println!("{}    Unhandled Attribute: {:?}", indent, attribute.0);
                     }
                 }
             }
@@ -151,10 +157,24 @@ fn recursive_access_node(
             .wait()
             .unwrap();
 
-        scene.add_component(entity, _RendererComponent { model });
+        scene
+            .lock()
+            .add_component(entity, _RendererComponent { model });
     }
 
-    for child in node.children() {
+    // for child in node.children() {
+    //     recursive_access_node(
+    //         &child,
+    //         Some(entity.id),
+    //         depth + 1,
+    //         scene,
+    //         assets,
+    //         buffers,
+    //         images,
+    //         file_path,
+    //     );
+    // }
+    node.children().par_bridge().for_each(|child| {
         recursive_access_node(
             &child,
             Some(entity.id),
@@ -165,7 +185,7 @@ fn recursive_access_node(
             images,
             file_path,
         );
-    }
+    });
 }
 // fn recursive_print_json(value: &serde_json::Value, depth: usize) {
 //     let indent = "  ".repeat(depth);
@@ -211,10 +231,10 @@ impl Asset for Scene {
     where
         Self: Sized,
     {
-        println!("Importing {:?}", path.as_ref());
+        println!("Loading {:?}", path.as_ref());
         let (document, buffers, images) =
             gltf::import(path.as_ref()).map_err(|e| format!("Failed to open GLTF file: {}", e))?;
-        println!("{:?} import completed", path.as_ref());
+        println!("{:?} load completed", path.as_ref());
         // recursive_print_json(document.as_json()., 0);
         // println!("Document {:?}", document);
         let root = document.as_json();
@@ -222,55 +242,61 @@ impl Asset for Scene {
         //     println!("Key: {}", key);
         //     recursive_print_json(value, 1);
         // }
-        println!("Accessors: {:?}", document.accessors().count());
-        for accessor in document.accessors() {
-            println!(" Accessor {:?}", accessor.count());
-        }
-        println!("Meshes: {:?}", document.meshes().count());
-        for mesh in document.meshes() {
-            println!(" Mesh {:?}", mesh.name());
-            for primitive in mesh.primitives() {
-                for attribute in primitive.attributes() {
-                    println!("  Attribute {:?} {:?}", attribute.0, attribute.1.index());
-                }
-                // println!("  Primitive {:?}", primitive.attributes());
-            }
-            // println!(" Mesh {:?}", mesh);
-            // for primitive in mesh.primitives() {
-            //     println!("  Primitive {:?}", primitive);
-            // }
-        }
-        println!("Nodes: {:?}", document.nodes().count());
+        // println!("Accessors: {:?}", document.accessors().count());
+        // for accessor in document.accessors() {
+        //     println!(" Accessor {:?}", accessor.count());
+        // }
+        // println!("Meshes: {:?}", document.meshes().count());
+        // for mesh in document.meshes() {
+        //     println!(" Mesh {:?}", mesh.name());
+        //     for primitive in mesh.primitives() {
+        //         for attribute in primitive.attributes() {
+        //             println!("  Attribute {:?} {:?}", attribute.0, attribute.1.index());
+        //         }
+        //         // println!("  Primitive {:?}", primitive.attributes());
+        //     }
+        //     // println!(" Mesh {:?}", mesh);
+        //     // for primitive in mesh.primitives() {
+        //     //     println!("  Primitive {:?}", primitive);
+        //     // }
+        // }
+        // println!("Nodes: {:?}", document.nodes().count());
         let mut scene =
             Scene::new(unsafe { (*std::ptr::addr_of!(ENGINE)).as_ref().unwrap().clone() });
+        let root_entity = scene.new_entity(_Transform::default());
+        // let _root_transform = scene
+        //     .transform_hierarchy
+        //     .get_transform_unchecked(root_entity.id);
+        let scene = Mutex::new(scene);
 
         for doc_scene in document.scenes() {
             // println!("Scene {:?}", scene);
             println!(" Scene has {} nodes", doc_scene.nodes().len());
-            for node in doc_scene.nodes() {
+            let _path = path.as_ref().to_path_buf();
+            doc_scene.nodes().par_bridge().for_each(|node| {
                 recursive_access_node(
                     &node,
                     None,
                     0,
-                    &mut scene,
+                    &scene,
                     &asset,
                     &buffers,
                     &images,
-                    path.as_ref().to_str().unwrap_or(""),
+                    _path.to_str().unwrap_or(""),
                 );
-                // for child in node.children() {
-                //     println!("  Child Node {:?}", child);
-                // }
-                // println!(" Node {:?}", node);
-            }
+            });
+            // for child in node.children() {
+            //     println!("  Child Node {:?}", child);
+            // }
+            // println!(" Node {:?}", node);
         }
         // Transformations are now applied during node creation, so we don't need
         // to recursively apply them after the fact
 
-        println!("Final Scene Transform Hierarchy:");
-        let t = scene.transform_hierarchy.get_transform_unchecked(0);
-        print_scene_recurs(&t, &scene, 0);
+        // println!("Final Scene Transform Hierarchy:");
+        // let t = scene.transform_hierarchy.get_transform_unchecked(0);
+        // print_scene_recurs(&t, &scene, 0);
 
-        Ok(scene)
+        Ok(Mutex::into_inner(scene))
     }
 }

@@ -106,6 +106,10 @@ void main() {
         case 2:
         {
             Renderer r = renderers[idx];
+            // Skip invalid/uninitialized renderers
+            if (r.m_id == uint(-1) || r.t_idx == uint(-1)) {
+                break;
+            }
             ModelIndirect mc = model_indirect[r.m_id];
             for (uint i = 0; i < mc.count; ++i) {
                 // atomicAdd(indirect[mc.offset + i].instanceCount, 1); // no culling yet
@@ -152,6 +156,10 @@ void main() {
                 {
                     // write indirect commands
                     Renderer r = renderers[idx];
+                    // Skip invalid/uninitialized renderers
+                    if (r.m_id == uint(-1) || r.t_idx == uint(-1)) {
+                        break;
+                    }
                     mat4 model_matrix = model_matrices[r.t_idx];
                     ModelIndirect mc = model_indirect[r.m_id];
                     for (uint i = 0; i < mc.count; ++i) {
@@ -276,14 +284,17 @@ void pass1_globalScan() {
     uint startIndex = uint(localSumSize * float(localId));
     uint endIndex = uint(localSumSize * float(localId + 1));
 
-    localSum = workgroupSums[startIndex];
-    workgroupSums[startIndex] = 0; // Clear the first element for the scan
+    // Only process if this thread has a valid range
+    if (startIndex < endIndex && startIndex < workgroupSums.length()) {
+        localSum = workgroupSums[startIndex];
+        workgroupSums[startIndex] = 0; // Clear the first element for the scan
 
-    for (uint i = startIndex + 1; i < endIndex && i < workgroupSums.length();
-        ++i) {
-        uint temp = workgroupSums[i];
-        workgroupSums[i] = localSum;
-        localSum += temp;
+        for (uint i = startIndex + 1; i < endIndex && i < workgroupSums.length();
+            ++i) {
+            uint temp = workgroupSums[i];
+            workgroupSums[i] = localSum;
+            localSum += temp;
+        }
     }
 
     // Load workgroup sums
@@ -304,9 +315,11 @@ void pass1_globalScan() {
     // if (localId < workgroupCount && localId < workgroupSums.length()) {
     //     workgroupSums[localId] += sharedData[localId];
     // }
+    // if (startIndex < endIndex) {
     for (uint i = startIndex; i < endIndex && i < workgroupSums.length(); ++i) {
         workgroupSums[i] += sharedData[localId];
     }
+    // }
 }
 
 // Pass 2: Add global offsets to local results
@@ -314,9 +327,8 @@ void pass2_addGlobal() {
     uint globalId = gl_GlobalInvocationID.x;
     uint workgroupId = gl_WorkGroupID.x;
 
-    if (globalId < uint(num_jobs) && workgroupId > 0 &&
-            (workgroupId - 1) < workgroupSums.length()) {
+    if (globalId < uint(num_jobs) && workgroupId < workgroupSums.length()) {
         // Add the accumulated sum from previous workgroups
-        indirect[globalId].firstInstance += workgroupSums[workgroupId - 1];
+        indirect[globalId].firstInstance += workgroupSums[workgroupId];
     }
 }

@@ -267,15 +267,12 @@ impl AssetManager {
         F: FnOnce(GPUWorkQueue, DeferredAssetQueue) -> Result<T, String> + Send + 'static,
     {
         let name_path = name_path.to_string();
-        if self
-            .loaded_assets_files
-            .lock()
+        let mut loaded_assets_files_lock = self.loaded_assets_files.lock();
+        if loaded_assets_files_lock
             .get(&TypeId::of::<T>())
             .is_some()
         {
-            if let Some(id) = self
-                .loaded_assets_files
-                .lock()
+            if let Some(id) = loaded_assets_files_lock
                 .get(&TypeId::of::<T>())
                 .unwrap()
                 .get(&name_path)
@@ -294,8 +291,7 @@ impl AssetManager {
             asset_id: new_id,
             _marker: std::marker::PhantomData,
         };
-        self.loaded_assets_files
-            .lock()
+        loaded_assets_files_lock
             .entry(type_id)
             .or_insert_with(HashMap::new)
             .insert(name_path, new_id);
@@ -320,7 +316,7 @@ impl AssetManager {
                             let asset_trait: Arc<dyn Asset> = arc_asset.clone();
                             let handle = AssetHandle::_from_id(asset_id);
                             if let Ok(model_asset) = asset_trait.downcast_arc::<Model>() {
-                                println!("Registering model asset id {}", asset_id);
+                                // println!("Registering model asset id {}", asset_id);
                                 _r.lock().register_model(handle, model_asset);
                             }
                             handle
@@ -346,7 +342,8 @@ impl AssetManager {
         callbk: Option<Box<dyn FnMut(AssetHandle<T>, Arc<T>) + Send + Sync>>,
     ) -> AssetHandle<T> {
         let type_id = TypeId::of::<T>();
-        let ret = if let Some(assets) = self.loaded_assets_files.lock().get(&type_id) {
+        let mut loaded_assets_files_lock = self.loaded_assets_files.lock();
+        let ret = if let Some(assets) = loaded_assets_files_lock.get(&type_id) {
             if let Some(id) = assets.get(path) {
                 AssetHandle {
                     // asset: path.to_string(),
@@ -356,8 +353,7 @@ impl AssetManager {
             } else {
                 // insert new id for this asset path
                 let new_id = self.next_asset_id.fetch_add(1, Ordering::SeqCst);
-                self.loaded_assets_files
-                    .lock()
+                loaded_assets_files_lock
                     .get_mut(&type_id)
                     .unwrap()
                     .insert(path.to_string(), new_id);
@@ -370,8 +366,7 @@ impl AssetManager {
         } else {
             // insert new id for this asset path
             let new_id = self.next_asset_id.fetch_add(1, Ordering::SeqCst);
-            self.loaded_assets_files
-                .lock()
+            loaded_assets_files_lock
                 .entry(type_id)
                 .or_insert_with(HashMap::new)
                 .insert(path.to_string(), new_id);
@@ -400,7 +395,7 @@ impl AssetManager {
                     if type_id == TypeId::of::<Model>() {
                         let asset_trait: Arc<dyn Asset> = arc_asset.clone();
                         if let Ok(model_asset) = asset_trait.downcast_arc::<Model>() {
-                            println!("Registering model asset id {}", asset_id);
+                            // println!("Registering model asset id {}", asset_id);
                             _r.lock()
                                 .register_model(AssetHandle::_from_id(asset_id), model_asset);
                         }

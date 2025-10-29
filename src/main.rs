@@ -13,6 +13,7 @@
 // original triangle example.
 #![feature(sync_unsafe_cell)]
 #![feature(portable_simd)]
+// #![feature(int_roundings)]
 #[allow(static_mut_refs)]
 use camera::Camera;
 use glam::Vec3;
@@ -97,7 +98,7 @@ const MAX_FRAMES_IN_FLIGHT: u32 = 4;
 // 1 << 21 = 2,097,152
 // 1 << 22 = 4,194,304
 // 1 << 23 = 8,388,608
-const NUM_CUBES: usize = 0;
+const NUM_CUBES: usize = 1 << 20;
 struct FPS {
     frame_times: std::collections::VecDeque<f32>,
     frame_ages: std::collections::VecDeque<time::Instant>,
@@ -186,6 +187,7 @@ struct App {
     render_thread_snd: SyncSender<render_thread::RenderData>,
     // render_data: Option<render_thread::RenderData>,
     commands: Vec<Arc<PrimaryAutoCommandBuffer>>,
+    b52_entity: Arc<Mutex<Option<u32>>>,
 }
 
 impl App {
@@ -195,6 +197,7 @@ impl App {
         }
         let gpu = gpu_manager::GPUManager::new(event_loop);
         *MESH_BUFFERS.lock() = Some(MeshBuffers::new(&gpu));
+        println!("NUM_CUBES {}", NUM_CUBES);
         // let vertices = [
         //     MyVertex {
         //         position: [-0.5 / 10.0, -0.25 / 10.0],
@@ -268,6 +271,8 @@ impl App {
         // }
         let mut bismarck_handle = None;
         let mut b52_handle = None;
+        let b52_entity_arc = Arc::new(Mutex::new(None));
+
         {
             let mut world = world.lock();
             world.components.register::<ComponentTest>(true);
@@ -291,7 +296,7 @@ impl App {
                 .rendering_system
                 .lock()
                 .get_or_register_model_handle(cube.clone());
-            // let __world = _world.clone();
+            let __world = _world.clone();
             // let a = asset_manager.load_asset::<Scene>(
             //     "assets/bismark_low_poly2.glb",
             //     Some(Box::new(move |handle, arc_asset| {
@@ -299,22 +304,25 @@ impl App {
             //     })),
             // );
             // bismarck_handle = Some(a);
+            //
             // let _world = world.clone();
             // let ready = Arc::new(AtomicBool::new(false));
             // let _ready = ready.clone();
+            let _b52_entity_arc = b52_entity_arc.clone();
             let a = asset_manager.load_asset::<Scene>(
-                "assets/OopsWholePlane1.glb",
+                "/home/sspohn/Documents/b52.1-4.glb",
                 Some(Box::new(move |handle, arc_asset| {
                     // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
-                    _world.lock().instantiate(&arc_asset);
+                    // *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
                 })),
             );
-            //          while !ready.load(std::sync::atomic::Ordering::SeqCst) {
-            // 	asset_manager.process_deferred_queue();
-            // 	gpu.process_work_queue();
-            // }
-            // println!("Loaded B-52");
+            // b52_entity = Some(Mutex::into_inner(Arc::into_inner(b52_entity_arc).unwrap()).unwrap());
             b52_handle = Some(a);
+            // //          while !ready.load(std::sync::atomic::Ordering::SeqCst) {
+            // // 	asset_manager.process_deferred_queue();
+            // // 	gpu.process_work_queue();
+            // // }
+            // // println!("Loaded B-52");
             //          while Arc::ptr_eq(
             // 	&a.get(&asset_manager),
             // 	&scene_placeholder,
@@ -453,6 +461,7 @@ impl App {
             render_thread_snd: renderdata_snd,
             // render_data: None,
             commands: Vec::new(),
+            b52_entity: b52_entity_arc,
         }
     }
 }
@@ -847,12 +856,16 @@ impl ApplicationHandler for App {
 
         let mut new_window = false;
         let mut new_bismarck = false;
+        let mut new_b52 = false;
         for (_window_id, rcx) in self.rcxs.iter_mut() {
             if rcx.input.get_key_pressed(KeyCode::KeyP) {
                 new_window = true;
             }
             if rcx.input.get_key_pressed(KeyCode::KeyB) {
                 new_bismarck = true;
+            }
+            if rcx.input.get_key_pressed(KeyCode::KeyN) {
+                new_b52 = true;
             }
             let camera = self.camera.get_mut(&_window_id).unwrap();
             let mut grabbed = self.cursor_grabbed;
@@ -929,6 +942,50 @@ impl ApplicationHandler for App {
                     .normalize(),
                     rand::random::<f32>() * std::f32::consts::TAU,
                 ));
+            }
+        }
+        if new_b52 {
+            let mut world = self.world.lock();
+            let entity =
+                world.instantiate(&self.b52_handle.as_ref().unwrap().get(&self.asset_manager));
+
+            {
+                let b52 = entity.lock();
+                b52.translate_by(Vec3::new(
+                    rand::random::<f32>() * 1000.0 - 500.0,
+                    0.0,
+                    rand::random::<f32>() * 1000.0 - 500.0,
+                ));
+                b52.rotate_by(glam::Quat::from_axis_angle(
+                    Vec3::new(
+                        rand::random::<f32>(),
+                        rand::random::<f32>(),
+                        rand::random::<f32>(),
+                    )
+                    .normalize(),
+                    rand::random::<f32>() * std::f32::consts::TAU,
+                ));
+            }
+        }
+
+        if let Some(b52_entity) = self.b52_entity.lock().as_ref() {
+            let world = self.world.lock();
+            let b52 = world.transform_hierarchy.get_transform(*b52_entity);
+            if let Some(b52) = b52 {
+                let mut b52 = b52.lock();
+                // let time_since_epoch = std::time::SystemTime::now()
+                // 	.duration_since(time::UNIX_EPOCH)
+                // 	.unwrap()
+                // 	.as_secs_f64();
+                // let angle = time_since_epoch % std::f64::consts::TAU;
+                // let angle = angle as f32;
+                // let radius = 500.0;
+                // b52.set_position(Vec3::new(angle.cos(), 0.0, angle.sin()) * radius);
+                // b52.set_rotation(glam::Quat::from_axis_angle(
+                // 	Vec3::Y,
+                // 	angle + std::f32::consts::FRAC_PI_2,
+                // ));
+                b52.rotate_by(glam::Quat::from_axis_angle(Vec3::Y, 0.2 * elapsed));
             }
         }
 

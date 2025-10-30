@@ -8,14 +8,24 @@ use vulkano::{
         AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
         RenderingAttachmentInfo, RenderingInfo,
     },
-    descriptor_set::{self, DescriptorSet, WriteDescriptorSet},
+    descriptor_set::{self, DescriptorSet, WriteDescriptorSet, layout::DescriptorBindingFlags},
     format::Format,
-    image::{view::ImageView, Image, ImageCreateInfo, ImageType, ImageUsage},
+    image::{Image, ImageCreateInfo, ImageType, ImageUsage, view::ImageView},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
     pipeline::{
+        DynamicState, GraphicsPipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
         graphics::{
-            color_blend::{ColorBlendAttachmentState, ColorBlendState}, depth_stencil::{DepthState, DepthStencilState}, input_assembly::InputAssemblyState, multisample::MultisampleState, rasterization::RasterizationState, subpass::PipelineRenderingCreateInfo, vertex_input::{Vertex, VertexDefinition}, viewport::{Viewport, ViewportState}, GraphicsPipelineCreateInfo
-        }, layout::PipelineDescriptorSetLayoutCreateInfo, DynamicState, GraphicsPipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo
+            GraphicsPipelineCreateInfo,
+            color_blend::{ColorBlendAttachmentState, ColorBlendState},
+            depth_stencil::{DepthState, DepthStencilState},
+            input_assembly::InputAssemblyState,
+            multisample::MultisampleState,
+            rasterization::RasterizationState,
+            subpass::PipelineRenderingCreateInfo,
+            vertex_input::{Vertex, VertexDefinition},
+            viewport::{Viewport, ViewportState},
+        },
+        layout::PipelineDescriptorSetLayoutCreateInfo,
     },
     render_pass::{AttachmentLoadOp, AttachmentStoreOp, Subpass},
     swapchain::{Surface, Swapchain, SwapchainCreateInfo},
@@ -137,7 +147,8 @@ impl RenderContext {
                 MyVertex::per_vertex(),
                 MyUV::per_vertex(),
                 MyNormal::per_vertex(),
-                InstanceMatrix::per_instance(),
+                MyColor::per_vertex(),
+                TransformID::per_instance(),
             ]
             .definition(&vs)
             .unwrap();
@@ -146,19 +157,35 @@ impl RenderContext {
                 PipelineShaderStageCreateInfo::new(vs),
                 PipelineShaderStageCreateInfo::new(fs),
             ];
-            let layout = PipelineLayout::new(
-                gpu.device.clone(),
-                PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                    .into_pipeline_layout_create_info(gpu.device.clone())
-                    .unwrap(),
-            )
-            .unwrap();
+            // let layout = PipelineLayout::new(
+            //     gpu.device.clone(),
+            //     PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+            //         .into_pipeline_layout_create_info(gpu.device.clone())
+            //         .unwrap(),
+            // )
+            // .unwrap();
 
             let subpass = PipelineRenderingCreateInfo {
                 color_attachment_formats: vec![Some(swapchain.image_format())],
                 depth_attachment_format: Some(Format::D32_SFLOAT),
                 ..Default::default()
             };
+
+            let mut layout_create_info =
+                PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages);
+            let binding = layout_create_info.set_layouts[0]
+                .bindings
+                .get_mut(&2)
+                .unwrap();
+            binding.binding_flags |= DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT;
+            binding.descriptor_count = 1024; // max number of textures
+            let pipeline_layout = PipelineLayout::new(
+                gpu.device.clone(),
+                layout_create_info
+                    .into_pipeline_layout_create_info(gpu.device.clone())
+                    .unwrap(),
+            )
+            .unwrap();
 
             // Finally, create the pipeline.
             GraphicsPipeline::new(
@@ -181,7 +208,7 @@ impl RenderContext {
                     }),
                     dynamic_state: [DynamicState::Viewport].into_iter().collect(),
                     subpass: Some(subpass.into()),
-                    ..GraphicsPipelineCreateInfo::layout(layout)
+                    ..GraphicsPipelineCreateInfo::layout(pipeline_layout)
                 },
             )
             .unwrap()
@@ -267,7 +294,7 @@ impl RenderContext {
         gpu: &GPUManager,
         assets: &AssetManager,
         rendering_system: &mut crate::renderer::RenderingSystem,
-        model_matrices: Subbuffer<[[[f32; 4]; 4]]>,
+        matrix_data: &Subbuffer<[crate::transform::compute::cs::MatrixData]>,
     ) {
         let window_size = self.window.inner_size();
 
@@ -275,7 +302,7 @@ impl RenderContext {
         camera.resize(gpu, [window_size.width, window_size.height]);
 
         let mut builder = gpu.create_command_buffer(CommandBufferUsage::SimultaneousUse);
-        rendering_system.update_mvp(camera.uniform.clone(), &mut builder, model_matrices);
+        rendering_system.update_mvp(camera.uniform.clone(), &mut builder, matrix_data);
 
         builder
             .begin_rendering(RenderingInfo {
@@ -299,7 +326,13 @@ impl RenderContext {
             .bind_pipeline_graphics(self.pipeline.clone())
             .unwrap();
 
-        rendering_system.draw(&mut builder, assets, self.pipeline.clone());
+        rendering_system.draw(
+            &mut builder,
+            assets,
+            self.pipeline.clone(),
+            camera.uniform.clone(),
+            matrix_data,
+        );
         builder.end_rendering().unwrap();
         // We leave the render pass.
         self.command_buffer = Some(builder.build().unwrap());
@@ -328,21 +361,32 @@ struct MyNormal {
     #[format(R32G32B32_SFLOAT)]
     normal: [f32; 3],
 }
+#[derive(BufferContents, Vertex)]
+#[repr(C)]
+struct MyColor {
+    #[format(R8G8B8A8_UNORM)]
+    color: u32,
+}
 
 #[derive(BufferContents, Vertex)]
 #[repr(C)]
-struct InstanceMatrix {
-    #[format(R32G32B32A32_SFLOAT)]
-    mvp_matrix: [[f32; 4]; 4],
-    // #[format(R32G32B32A32_SFLOAT)]
-    // row0: [f32; 4],
-    // #[format(R32G32B32A32_SFLOAT)]
-    // row1: [f32; 4],
-    // #[format(R32G32B32A32_SFLOAT)]
-    // row2: [f32; 4],
-    // #[format(R32G32B32A32_SFLOAT)]
-    // row3: [f32; 4],
+struct TransformID {
+    #[format(R32G32_UINT)]
+    rd: [u32; 2],
 }
+
+// #[derive(BufferContents, Vertex)]
+// #[repr(C)]
+// struct InstanceMatrix {
+//     #[format(R32G32B32A32_SFLOAT)]
+//     mvp_matrix: [[f32; 4]; 4],
+// }
+// #[derive(BufferContents, Vertex)]
+// #[repr(C)]
+// struct NormalMatrix {
+//     #[format(R32G32B32_SFLOAT)]
+//     normal_matrix: [[f32; 4]; 3],
+// }
 
 /// This function is called once during initialization, then again whenever the window is resized.
 fn window_size_dependent_setup(images: &[Arc<Image>]) -> (Vec<Arc<ImageView>>, Vec<Arc<Image>>) {

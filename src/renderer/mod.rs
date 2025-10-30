@@ -15,6 +15,7 @@ use vulkano::{
         DrawIndexedIndirectCommand, PrimaryAutoCommandBuffer,
     },
     descriptor_set::{DescriptorSet, WriteDescriptorSet},
+    image::{sampler::Sampler, view::ImageView},
     memory::allocator::MemoryTypeFilter,
     pipeline::{
         ComputePipeline, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
@@ -49,17 +50,25 @@ struct Renderer {
     t_idx: u32,
 }
 
+struct ModelCount {
+    count: u32,
+    num_mesh: u32,
+}
+
 pub struct RenderingSystem {
     gpu: Arc<GPUManager>,
     pipeline: Arc<ComputePipeline>,
     pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
     // buffers
     indirect_commands_buffer: GpuVec<DrawIndexedIndirectCommand>,
+    indirect_texture_vec: GpuVec<u32>, // texture per indirect draw command
+    texture_map: HashMap<u32, u32>, // texture asset_id -> texture idx
+    registered_textures: Vec<AssetHandle<Texture>>, // to avoid duplicate texture loads
     renderer_buffer: GpuVec<cs::Renderer>,
     renderer_inits_buffer: GpuVec<cs::RendererInit>,
     renderer_uninits_buffer: GpuVec<u32>,
     model_indirect_buffer: GpuVec<cs::ModelIndirect>, // [indirect_offset, count]
-    mvp_buffer: GpuVec<[[f32; 4]; 4]>,
+    transform_ids_buffer: GpuVec<cs::RenderData>,
     workgroup_sums_buffer: GpuVec<u32>,
     stages: Subbuffer<[cs::Stage]>,
     dispatch: Subbuffer<[DispatchIndirectCommand]>,
@@ -75,6 +84,7 @@ pub struct RenderingSystem {
     // intermediate_counter: AtomicU32,
     renderer_storage: Storage<Renderer>,
     mvp_count: AtomicU32,
+    model_counts: HashMap<u32, ModelCount>,
     model_registered: AtomicBool,
     // model_indirects: Vec<cs::ModelIndirect>,
 }
@@ -101,9 +111,7 @@ impl Component for RendererComponent {
         rendering_system
             .renderer_uninits_buffer
             .push_data(self.r_idx);
-        rendering_system
-            .mvp_count
-            .fetch_sub(1, Ordering::SeqCst);
+        rendering_system.mvp_count.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -170,9 +178,16 @@ impl RenderingSystem {
                 BufferUsage::INDIRECT_BUFFER | BufferUsage::STORAGE_BUFFER,
                 true,
             ),
+            indirect_texture_vec: GpuVec::new(
+				&gpu,
+				BufferUsage::STORAGE_BUFFER,
+				true,
+			),
+            texture_map: HashMap::new(),
+            registered_textures: Vec::new(),
             renderer_buffer: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
             model_indirect_buffer: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
-            mvp_buffer: GpuVec::new(
+            transform_ids_buffer: GpuVec::new(
                 &gpu,
                 BufferUsage::STORAGE_BUFFER | BufferUsage::VERTEX_BUFFER,
                 false,
@@ -198,6 +213,7 @@ impl RenderingSystem {
             // intermediate_counter: AtomicU32::new(0),
             renderer_storage: Storage::new(),
             mvp_count: AtomicU32::new(0),
+            model_counts: HashMap::new(),
             // indirect_counts: HashMap::new(),
             // model_counts: HashMap::new(),
             indirect_model_map: HashMap::new(),
@@ -207,57 +223,40 @@ impl RenderingSystem {
     pub fn get_or_register_model_handle(&mut self, model: AssetHandle<Model>) -> u32 {
         let m_id = model.asset_id;
         if !self.model_map.contains_key(&m_id) {
-            // let interm_idx = self
-            //     .intermediate_counter
-            //     .fetch_add(1, Ordering::SeqCst);
             let idx = self.model_indirect_buffer.data_len() as u32;
             self.model_indirect_buffer.push_data(cs::ModelIndirect {
                 offset: 0,
                 count: 1,
             }); // render placeholder mesh
-            // self.indirect_map.insert(interm_idx, idx);
             self.model_map.insert(m_id, idx);
-            // initialize counts
-            // self.model_counts.insert(m_id, 0);
-            // self.indirect_counts.insert(interm_idx, 0);
+            self.model_counts.insert(
+                idx,
+                ModelCount {
+                    count: 0,
+                    num_mesh: 1,
+                },
+            );
             self.indirect_model_map.insert(idx, m_id);
         }
         *self.model_map.get(&m_id).unwrap()
     }
     pub fn register_model(&mut self, model: AssetHandle<Model>, asset: Arc<Model>) {
-        let m_id = model.asset_id;
+        // let m_id = model.asset_id;
         // let m_idx = model.get(assets).id;
         // let t_idx = transform.get_idx();
         let ind_idx = self.get_or_register_model_handle(model);
         self.model_asset_map.insert(ind_idx, asset.clone());
 
         let mesh_count = asset.meshes.len() as u32;
-        // let model_indirect_buffer_idx = self.model_indirect_buffer.data_len() as u32;
-        // if let Some(prev) = self
-        //     .indirect_map
-        //     .insert(intermediate_idx, model_indirect_buffer_idx)
-        // {
-        //     // get previously created renderers count, subtract from placeholder
-        //     // and increment the new model indirect count by the number of meshes * previous count
-        //     let model_idx = *self
-        //         .indirect_model_map
-        //         .get(&intermediate_idx)
-        //         .expect("Intermediate idx not found in indirect_model_map");
-        //     let count = *self
-        //         .model_counts
-        //         .get(&model_idx)
-        //         .expect("Model idx not found in model_counts");
-        //     self.indirect_counts.get_mut(&prev).map(|c| *c -= count);
-        //     self.indirect_counts
-        //         .entry(model_indirect_buffer_idx)
-        //         .and_modify(|c| *c += mesh_count * count)
-        //         .or_insert(mesh_count * count);
-        //     self.mvp_count
-        //         .fetch_sub(count, Ordering::SeqCst);
-        //     self.mvp_count
-        //         .fetch_add(mesh_count * count, Ordering::SeqCst);
-        // }
-        // let ind_idx = *self.indirect_map.get(&intermediate_idx).unwrap();
+        self.model_counts.get(&ind_idx).map(|mc| {
+            self.mvp_count
+                .fetch_sub(mc.count * mc.num_mesh, Ordering::SeqCst);
+        });
+        self.model_counts.get_mut(&ind_idx).map(|mc| {
+            mc.num_mesh = mesh_count;
+            self.mvp_count
+                .fetch_add(mesh_count * mc.count, Ordering::SeqCst);
+        });
 
         let indirect_offset = self.indirect_commands_buffer.data_len() as u32;
         for mesh in &asset.meshes {
@@ -269,6 +268,16 @@ impl RenderingSystem {
                     vertex_offset: mesh.vertex_offset,
                     first_instance: 0,
                 });
+            let tex_idx = self
+                .texture_map
+                .entry(mesh.texture.unwrap_or_default().asset_id)
+                .or_insert_with(|| {
+                    let tex_idx = self.registered_textures.len() as u32;
+                    self.registered_textures
+                        .push(mesh.texture.unwrap_or_default().clone());
+                    tex_idx
+                });
+            self.indirect_texture_vec.push_data(*tex_idx);
         }
         *self
             .model_indirect_buffer
@@ -277,36 +286,24 @@ impl RenderingSystem {
             offset: indirect_offset,
             count: mesh_count,
         };
-        self.model_registered
-            .store(true, Ordering::SeqCst);
+
+        self.model_registered.store(true, Ordering::SeqCst);
         // self.command_buffer = None; // invalidate command buffer
     }
-    // pub fn update_num_counts(&mut self, model: AssetHandle<Model>) {
-    //     let asset_id = model.asset_id;
-    //     let interm_id = self.get_or_register_model_handle(model);
-    //     let ind_id = *self.indirect_map.get(&interm_id).unwrap();
-    //     let count = self
-    //         .model_indirect_buffer
-    //         .get_data(interm_id as usize)
-    //         .map_or(1, |mi| mi.count);
-    //     self.mvp_count
-    //         .fetch_add(count, Ordering::SeqCst);
-    //     // self.indirect_counts
-    //     //     .entry(ind_id)
-    //     //     .and_modify(|c| *c += count)
-    //     //     .or_insert(count);
-    //     // self.model_counts
-    //     //     .entry(asset_id)
-    //     //     .and_modify(|c| *c += 1)
-    //     //     .or_insert(1);
-    // }
     pub fn renderer(&mut self, model: AssetHandle<Model>, transform: &Transform) -> u32 {
         let ind_id = self.get_or_register_model_handle(model.clone());
-        self.mvp_count
-            .fetch_add(1, Ordering::SeqCst);
+        let count = self
+            .model_counts
+            .get_mut(&ind_id)
+            .map(|mc| {
+                mc.count += 1;
+                mc.num_mesh
+            })
+            .unwrap();
+        self.mvp_count.fetch_add(count, Ordering::SeqCst);
+
         if self.used_model_set.insert(ind_id) {
-            self.model_registered
-                .store(true, Ordering::SeqCst);
+            self.model_registered.store(true, Ordering::SeqCst);
         }
         // self.update_num_counts(model);
         let t_idx = transform.get_idx();
@@ -331,7 +328,7 @@ impl RenderingSystem {
     pub fn compute_renderers(
         &mut self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-        model_matrices: &Subbuffer<[[[f32; 4]; 4]]>,
+        matrix_data: &Subbuffer<[crate::transform::compute::cs::MatrixData]>,
         // assets_loaded: bool, // cam: &Subbuffer<crate::vs::camera>,
     ) -> bool {
         let mut ret = false;
@@ -345,13 +342,9 @@ impl RenderingSystem {
         ret |= self.model_indirect_buffer.upload_delta(&self.gpu, builder);
         // println!("ret/model_indirect: {}", ret);
 
-        if self
-            .model_registered
-            .load(Ordering::SeqCst)
-        {
+        if self.model_registered.load(Ordering::SeqCst) {
             ret |= self.model_indirect_buffer.force_update(&self.gpu, builder);
-            self.model_registered
-                .store(false, Ordering::SeqCst);
+            self.model_registered.store(false, Ordering::SeqCst);
         }
         // println!("ret/model_indirect force: {}", ret);
 
@@ -360,7 +353,12 @@ impl RenderingSystem {
             .resize_buffer(self.renderer_storage.len(), &self.gpu, builder);
         // println!("ret/renderer_buffer: {}", ret);
 
-        ret |= self.mvp_buffer.resize_buffer(self.mvp_count.load(Ordering::SeqCst) as usize, &self.gpu, builder);
+        ret |= self.transform_ids_buffer.resize_buffer(
+            // self.mvp_count.load(Ordering::SeqCst) as usize,
+            1 << 21,
+            &self.gpu,
+            builder,
+        );
         // println!("ret/mvp_buffer: {}", ret);
         // println!("Renderer System: {} MVPs", self.mvp_count.load(Ordering::SeqCst));
 
@@ -379,6 +377,9 @@ impl RenderingSystem {
         ret |= self
             .indirect_commands_buffer
             .upload_delta(&self.gpu, builder);
+        ret |= self
+			.indirect_texture_vec
+			.upload_delta(&self.gpu, builder);
         // println!("ret/indirect_commands upload: {}", ret);
 
         if self.command_buffer.is_none() || ret || resized {
@@ -391,14 +392,16 @@ impl RenderingSystem {
                 self.gpu.desc_alloc.clone(),
                 layout_0.clone(),
                 [
-                    WriteDescriptorSet::buffer(0, model_matrices.clone()),
-                    WriteDescriptorSet::buffer(1, self.mvp_buffer.buf()),
+                    WriteDescriptorSet::buffer(0, matrix_data.clone()),
+                    WriteDescriptorSet::buffer(1, self.transform_ids_buffer.buf()),
                     WriteDescriptorSet::buffer(2, self.renderer_buffer.buf()),
                     WriteDescriptorSet::buffer(3, self.renderer_inits_buffer.buf()),
                     WriteDescriptorSet::buffer(4, self.renderer_uninits_buffer.buf()),
                     WriteDescriptorSet::buffer(5, self.model_indirect_buffer.buf()),
                     WriteDescriptorSet::buffer(6, self.workgroup_sums_buffer.buf()),
                     WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.buf()),
+                    WriteDescriptorSet::buffer(8, self.indirect_texture_vec.buf()),
+                    // WriteDescriptorSet::buffer(9, normal_matrices.clone()),
                 ],
                 [],
             )
@@ -499,7 +502,7 @@ impl RenderingSystem {
         &mut self,
         cam: Subbuffer<crate::vs::camera>,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-        model_matrices: Subbuffer<[[[f32; 4]; 4]]>,
+        matrix_data: &Subbuffer<[crate::transform::compute::cs::MatrixData]>,
     ) {
         builder
             .bind_pipeline_compute(self.pipeline.clone())
@@ -509,14 +512,15 @@ impl RenderingSystem {
             self.gpu.desc_alloc.clone(),
             layout_0.clone(),
             [
-                WriteDescriptorSet::buffer(0, model_matrices),
-                WriteDescriptorSet::buffer(1, self.mvp_buffer.buf()),
+                WriteDescriptorSet::buffer(0, matrix_data.clone()),
+                WriteDescriptorSet::buffer(1, self.transform_ids_buffer.buf()),
                 WriteDescriptorSet::buffer(2, self.renderer_buffer.buf()),
                 WriteDescriptorSet::buffer(3, self.gpu.empty.clone()),
                 WriteDescriptorSet::buffer(4, self.gpu.empty.clone()),
                 WriteDescriptorSet::buffer(5, self.model_indirect_buffer.buf()),
                 WriteDescriptorSet::buffer(6, self.gpu.empty.clone()),
                 WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.buf()),
+                WriteDescriptorSet::buffer(8, self.indirect_texture_vec.buf()),
             ],
             [],
         )
@@ -564,6 +568,8 @@ impl RenderingSystem {
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         assets: &AssetManager,
         pipeline: Arc<GraphicsPipeline>,
+        camera: Subbuffer<crate::vs::camera>,
+        matrix_data: &Subbuffer<[crate::transform::compute::cs::MatrixData]>,
     ) {
         if self.indirect_commands_buffer.data_len() == 0 {
             return;
@@ -572,18 +578,36 @@ impl RenderingSystem {
             panic!("Indirect commands buffer not up to date");
         }
 
-        let texture: Arc<Texture> = AssetHandle::default().get(assets);
+        // let texture: Arc<Texture> = AssetHandle::default().get(assets);
         let buffers_guard = MESH_BUFFERS.lock();
         let mesh_buffers = buffers_guard.as_ref().unwrap();
 
-        let set = DescriptorSet::new(
+        // let textures = self
+        //     .indirect_texture_vec
+        //     .iter()
+        //     .map(|t_idx| {
+        //         let texture_handle = AssetHandle::<Texture>::_from_id(*t_idx);
+        //         let tex = texture_handle.get(assets);
+        //         (tex.image.clone(), tex.sampler.clone())
+        //     })
+        //     .collect::<Vec<_>>();
+        let textures: Vec<_> = self
+			.registered_textures.iter()
+			.map(|texture_handle| {
+				let tex = texture_handle.get(assets);
+				(tex.image.clone(), tex.sampler.clone())
+			})
+			.collect();
+
+        let set = DescriptorSet::new_variable(
             self.gpu.desc_alloc.clone(),
             pipeline.layout().set_layouts().get(0).unwrap().clone(),
-            [WriteDescriptorSet::image_view_sampler(
-                1,
-                texture.image.clone(),
-                texture.sampler.clone(),
-            )],
+            textures.len() as u32,
+            [
+                WriteDescriptorSet::buffer(0, camera.clone()),
+                WriteDescriptorSet::buffer(1, matrix_data.clone()),
+                WriteDescriptorSet::image_view_sampler_array(2, 0, textures),
+            ],
             [],
         )
         .unwrap();
@@ -601,7 +625,8 @@ impl RenderingSystem {
                     mesh_buffers.vertex_buffer.buf(),
                     mesh_buffers.tex_coord_buffer.buf(),
                     mesh_buffers.normal_buffer.buf(),
-                    self.mvp_buffer.buf().clone(),
+                    mesh_buffers.color_buffer.buf(),
+                    self.transform_ids_buffer.buf(),
                 ),
             )
             .unwrap()

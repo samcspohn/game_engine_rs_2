@@ -11,6 +11,7 @@ use crate::{
     engine::Engine,
     obj_loader::{MESH_BUFFERS, Mesh, Model},
     renderer::_RendererComponent,
+    // texture::{self, Texture},
     transform::{_Transform, Transform},
 };
 
@@ -64,49 +65,114 @@ fn recursive_access_node(
     //     parent: Some(parent.unwrap_or(0)),
     // };
     let t = _Transform {
-		position: local_position,
-		rotation: local_rotation,
-		scale: local_scale,
-		name: node.name().unwrap_or("").to_string(),
-		parent: Some(parent.unwrap_or(0)),
-	};
+        position: local_position,
+        rotation: local_rotation,
+        scale: local_scale,
+        name: node.name().unwrap_or("").to_string(),
+        parent: Some(parent.unwrap_or(0)),
+    };
     let entity = scene.lock().new_entity(t);
-
+    let mut meshes = Vec::new();
     if let Some(mesh) = node.mesh() {
         // println!("{} ^-Mesh: {:?}", indent, mesh.name());
-        let mut vertices = Vec::new();
-        let mut normals = Vec::new();
-        let mut tex_coords = Vec::new();
-        let mut indices = Vec::new();
 
+        // let mut texture = None;
         for primitive in mesh.primitives() {
+            let mut _mesh = Mesh::new();
+            // Extract base color texture (diffuse)
+            let texture_index = primitive
+                .material()
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .map(|info| {
+                    let texture = info.texture();
+                    let image = texture.source();
+                    image.index()
+                });
+            let base_color = primitive
+                .material()
+                .pbr_metallic_roughness()
+                .base_color_factor();
+
+            // let alpha = primitive.material().
+            let _base_color_texture = texture_index.and_then(|idx| images.get(idx as usize));
+            let name_path = format!(
+                "{}._tex_{}",
+                file_path,
+                // mesh.name().unwrap_or(""),
+                texture_index.unwrap_or(0)
+            );
+            _mesh.texture = if let Some(tex) = _base_color_texture {
+                let tex = tex.clone();
+                Some(
+                    assets
+                        .enqueue_work(move |a| {
+                            a.load_asset_custom(name_path.as_str(), move |g, _a| {
+                                Ok(g.enqueue_work(move |g| {
+                                    crate::texture::Texture::from_bytes(
+                                        g,
+                                        &tex.pixels,
+                                        tex.width,
+                                        tex.height,
+                                        crate::texture::get_format(tex.format),
+                                        Some(base_color),
+                                    )
+                                })
+                                .wait()
+                                .unwrap())
+                            })
+                        })
+                        .wait()
+                        .unwrap(),
+                )
+                // println!("{}   Base Color Texture: {}x{} {:?}", indent, tex.width, tex.height, tex.format);
+            } else {
+            	Some(assets.enqueue_work(move |a| {
+             	a.load_asset_custom("no-tex", move |g, _a| {
+					 Ok(g.enqueue_work(move |g| {
+						 crate::texture::Texture::white(g)
+						}).wait().unwrap())
+				 })
+             }).wait().unwrap())
+            };
+
             let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
 
             // Track the base vertex index for this primitive
-            let base_vertex = vertices.len() as u32;
+            // let base_vertex = mesh.vertices.len() as u32;
 
             // Read positions
             if let Some(positions) = reader.read_positions() {
-                vertices.extend(positions);
+                _mesh.vertices.extend(positions);
             }
 
             // Read normals
             if let Some(normals_iter) = reader.read_normals() {
-                normals.extend(normals_iter);
+                _mesh.normals.extend(normals_iter);
             }
 
             // Read texture coordinates (UV)
             if let Some(tex_coords_iter) = reader.read_tex_coords(0) {
-                tex_coords.extend(tex_coords_iter.into_f32());
+                _mesh.tex_coords.extend(tex_coords_iter.into_f32());
             } else {
                 // If no texture coordinates, fill with zeroes
-                let new_vertex_count = vertices.len() - base_vertex as usize;
-                tex_coords.extend(std::iter::repeat([0.0, 0.0]).take(new_vertex_count));
+                // let new_vertex_count = vertices.len() - base_vertex as usize;
+                _mesh
+                    .tex_coords
+                    .extend(std::iter::repeat([0.0, 0.0]).take(_mesh.vertices.len()));
+            }
+
+            if let Some(colors_iter) = reader.read_colors(0) {
+                _mesh.colors.extend(colors_iter.into_rgba_u8())
+            } else {
+                _mesh
+                    .colors
+                    .extend(std::iter::repeat([255, 255, 255, 255]).take(_mesh.vertices.len()));
             }
 
             // Read indices and offset them by the base vertex index
             if let Some(indices_iter) = reader.read_indices() {
-                indices.extend(indices_iter.into_u32().map(|idx| idx + base_vertex));
+                _mesh.indices.extend(indices_iter.into_u32());
             }
             for attribute in primitive.attributes() {
                 // println!("{}    Attribute {:?} {:?}", indent, attribute.0, attribute.1.index());
@@ -128,30 +194,29 @@ fn recursive_access_node(
                     }
                 }
             }
+            meshes.push(_mesh);
         }
-        let name_path = format!("{}.{}", file_path, mesh.name().unwrap_or_default());
-
+        let name_path = format!("{}.{}", file_path, mesh.name().unwrap_or_default(),);
         let model = assets
             .enqueue_work(move |a| {
                 a.load_asset_custom(&name_path, move |g, a| {
-                    let (vertex_offset, index_offset) =
-                        if let Some(buffers) = MESH_BUFFERS.lock().as_mut() {
-                            buffers.add_mesh(&vertices, &normals, &tex_coords, &indices)
-                        } else {
-                            panic!("MESH_BUFFERS not initialized");
-                        };
-                    Ok(Model {
-                        meshes: vec![Mesh {
-                            vertices,
-                            normals,
-                            tex_coords,
-                            indices,
-                            vertex_offset,
-                            index_offset,
-                            // index_count: indices.len() as u32,
-                            // texture: Arc::new(Mutex::new(None)),
-                        }],
-                    })
+                    for m in &mut meshes {
+                        let (vertex_offset, index_offset) =
+                            if let Some(buffers) = MESH_BUFFERS.lock().as_mut() {
+                                buffers.add_mesh(
+                                    &m.vertices,
+                                    &m.normals,
+                                    &m.tex_coords,
+                                    &m.colors,
+                                    &m.indices,
+                                )
+                            } else {
+                                panic!("MESH_BUFFERS not initialized");
+                            };
+                        m.vertex_offset = vertex_offset;
+                        m.index_offset = index_offset;
+                    }
+                    Ok(Model { meshes: meshes })
                 })
             })
             .wait()

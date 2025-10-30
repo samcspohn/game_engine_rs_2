@@ -21,9 +21,9 @@ impl Asset for Texture {
     {
         if let Ok(img) = image::open(&path) {
             let pixels: Vec<u8> = img.to_rgba8().iter().cloned().collect();
-            
+
             let (image, sampler) = gpu.enqueue_work(move |g| {
-                texture_from_bytes(g, &pixels, img.width(), img.height())
+                texture_from_bytes(g, &pixels, img.width(), img.height(), None, None)
             }).wait().unwrap();
             // let mut texture_array = TEXTURE_ARRAY.lock();
             // let index = {
@@ -66,9 +66,45 @@ impl Texture {
             255, 255, 0, 255, // Yellow
             0, 0, 0, 255,     // Black
         ];
-        let (image, sampler) = texture_from_bytes(gpu, &pixels, 2, 2);
+        let (image, sampler) = texture_from_bytes(gpu, &pixels, 2, 2, None, None);
         Texture { image, sampler }
     }
+    pub fn white(gpu: &GPUManager) -> Self {
+		let pixels: Vec<u8> = vec![
+			255, 255, 255, 255, // White
+		];
+		let (image, sampler) = texture_from_bytes(gpu, &pixels, 1, 1, None, None);
+		Texture { image, sampler }
+	}
+	pub fn black(gpu: &GPUManager) -> Self {
+		let pixels: Vec<u8> = vec![
+			0, 0, 0, 255, // Black
+		];
+		let (image, sampler) = texture_from_bytes(gpu, &pixels, 1, 1, None, None);
+		Texture { image, sampler }
+	}
+	pub fn from_bytes(gpu: &GPUManager, data: &[u8], width: u32, height: u32, format: Option<Format>, base_color: Option<[f32;4]>) -> Self {
+		let (image, sampler) = texture_from_bytes(gpu, data, width, height, format, base_color);
+		Texture { image, sampler }
+	}
+}
+
+pub fn get_format(format: gltf::image::Format) -> Option<Format> {
+	match format {
+		gltf::image::Format::R8 => Some(Format::R8_SRGB),
+		gltf::image::Format::R8G8 => Some(Format::R8G8_SRGB),
+		gltf::image::Format::R8G8B8 => Some(Format::R8G8B8_SRGB),
+		gltf::image::Format::R8G8B8A8 => Some(Format::R8G8B8A8_SRGB),
+		// gltf::image::Format::B8G8R8 => Some(Format::B8G8R8_UNORM),
+		// gltf::image::Format::B8G8R8A8 => Some(Format::B8G8R8A8_UNORM),
+		gltf::image::Format::R16 => Some(Format::R16_SNORM),
+		gltf::image::Format::R16G16 => Some(Format::R16G16_SNORM),
+		gltf::image::Format::R16G16B16 => Some(Format::R16G16B16_SNORM),
+		gltf::image::Format::R16G16B16A16 => Some(Format::R16G16B16A16_SNORM),
+		gltf::image::Format::R32G32B32A32FLOAT => Some(Format::R32G32B32A32_SFLOAT),
+		gltf::image::Format::R32G32B32FLOAT => Some(Format::R32G32B32_SFLOAT),
+		_ => None,
+	}
 }
 
 pub fn texture_from_bytes(
@@ -76,6 +112,8 @@ pub fn texture_from_bytes(
     data: &[u8],
     width: u32,
     height: u32,
+    format: Option<Format>,
+    _base_color: Option<[f32;4]>,
 ) -> (Arc<ImageView>, Arc<Sampler>) {
     let mut uploads = AutoCommandBufferBuilder::primary(
         gpu.cmd_alloc.clone(),
@@ -83,8 +121,31 @@ pub fn texture_from_bytes(
         CommandBufferUsage::OneTimeSubmit,
     )
     .unwrap();
+    let mut data = data.to_vec();
 
-    let format = Format::R8G8B8A8_SRGB;
+    let base_color = _base_color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
+    let mut format = format.unwrap_or(Format::R8G8B8A8_SRGB);
+    if format == Format::R8G8B8_SRGB {
+    	data = {
+			let mut new_data = Vec::with_capacity((width * height * 4) as usize);
+			for i in 0..(width * height) as usize {
+				new_data.push(data[i * 3]);
+				new_data.push(data[i * 3 + 1]);
+				new_data.push(data[i * 3 + 2]);
+				new_data.push(255u8);
+			}
+			new_data
+		};
+     format = Format::R8G8B8A8_SRGB;
+
+    }
+  //   for col in data.chunks_mut(4) {
+  //   	col[0] = ((col[0] as f32 / 255.0) * base_color[0]) as u8 * 255;
+		// col[1] = ((col[1] as f32 / 255.0) * base_color[1]) as u8 * 255;
+		// col[2] = ((col[2] as f32 / 255.0) * base_color[2]) as u8 * 255;
+		// col[3] = ((col[3] as f32 / 255.0) * base_color[3]) as u8 * 255;
+  //   }
+
     let extent: [u32; 3] = [width, height, 1];
     let array_layers = 1u32;
 
@@ -108,7 +169,7 @@ pub fn texture_from_bytes(
     {
         let mut image_data = &mut *upload_buffer.write().unwrap();
 
-        image_data.copy_from_slice(data);
+        image_data.copy_from_slice(&data);
     }
 
     let region = BufferImageCopy {
@@ -133,7 +194,7 @@ pub fn texture_from_bytes(
         },
         AllocationCreateInfo::default(),
     )
-    .unwrap();
+    .expect(&format!("failed to create image with format: {:?}", format));
 
     uploads
         // .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(

@@ -24,12 +24,27 @@ struct ModelIndirect {
     uint offset;
     uint count;
 };
-layout(set = 0, binding = 0) buffer ModelMatrices {
-    mat4 model_matrices[];
+
+struct MatrixData {
+    mat4 model;
+    mat3 normal;
+    mat4 mvp;
 };
-layout(set = 0, binding = 1) buffer MVP {
-    mat4 mvp[];
+
+// layout(set = 1, binding = 5) buffer DirtyL2 { uint dirty_l2[]; };
+layout(set = 0, binding = 0) buffer MatrixBuffer {
+    MatrixData m[];
 };
+
+struct RenderData {
+    uint t_id;
+    uint mat_id;
+};
+
+layout(set = 0, binding = 1) buffer TransformIDs {
+    RenderData transform_ids[];
+};
+
 layout(set = 0, binding = 2) buffer Renderers {
     Renderer renderers[];
 };
@@ -48,6 +63,9 @@ layout(set = 0, binding = 6, std430) restrict buffer WorkgroupSumsBuffer {
 };
 layout(set = 0, binding = 7) buffer IndirectCommands {
     VkDrawIndexedIndirectCommand indirect[];
+};
+layout(set = 0, binding = 8) buffer MaterialIds {
+    uint material_ids[];
 };
 
 layout(set = 1, binding = 1) uniform camera {
@@ -160,12 +178,17 @@ void main() {
                     if (r.m_id == uint(-1) || r.t_idx == uint(-1)) {
                         break;
                     }
-                    mat4 model_matrix = model_matrices[r.t_idx];
+                    mat4 model_matrix = m[r.t_idx].model;
+                    m[r.t_idx].mvp = cam.proj * cam.view * model_matrix;
+                    // mat3 normal = inverse(transpose(mat3(model_matrix)));
                     ModelIndirect mc = model_indirect[r.m_id];
                     for (uint i = 0; i < mc.count; ++i) {
                         uint mvp_idx = indirect[mc.offset + i].firstInstance +
                                 atomicAdd(indirect[mc.offset + i].instanceCount, 1);
-                        mvp[mvp_idx] = cam.proj * cam.view * model_matrix;
+                        transform_ids[mvp_idx].t_id = r.t_idx;
+                        transform_ids[mvp_idx].mat_id = material_ids[mc.offset + i];
+                        // mvp[mvp_idx] = cam.proj * cam.view * model_matrix;
+                        // normal_matrices[mvp_idx] = normal;
                     }
                 }
                 break;

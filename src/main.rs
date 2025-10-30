@@ -98,7 +98,7 @@ const MAX_FRAMES_IN_FLIGHT: u32 = 4;
 // 1 << 21 = 2,097,152
 // 1 << 22 = 4,194,304
 // 1 << 23 = 8,388,608
-const NUM_CUBES: usize = 1 << 20;
+const NUM_CUBES: usize = 4;
 struct FPS {
     frame_times: std::collections::VecDeque<f32>,
     frame_ages: std::collections::VecDeque<time::Instant>,
@@ -297,47 +297,27 @@ impl App {
                 .lock()
                 .get_or_register_model_handle(cube.clone());
             let __world = _world.clone();
-            // let a = asset_manager.load_asset::<Scene>(
-            //     "assets/bismark_low_poly2.glb",
-            //     Some(Box::new(move |handle, arc_asset| {
-            //         __world.lock().instantiate(&arc_asset);
-            //     })),
-            // );
-            // bismarck_handle = Some(a);
-            //
-            // let _world = world.clone();
-            // let ready = Arc::new(AtomicBool::new(false));
-            // let _ready = ready.clone();
+            let a = asset_manager.load_asset::<Scene>(
+                "assets/bismark_low_poly2.glb",
+                Some(Box::new(move |handle, arc_asset| {
+                    // __world.lock().instantiate(&arc_asset);
+                })),
+            );
+            bismarck_handle = Some(a);
+
             let _b52_entity_arc = b52_entity_arc.clone();
             let a = asset_manager.load_asset::<Scene>(
                 "/home/sspohn/Documents/b52.1-4.glb",
                 Some(Box::new(move |handle, arc_asset| {
                     // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
-                    // *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
+                    *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
                 })),
             );
-            // b52_entity = Some(Mutex::into_inner(Arc::into_inner(b52_entity_arc).unwrap()).unwrap());
             b52_handle = Some(a);
-            // //          while !ready.load(std::sync::atomic::Ordering::SeqCst) {
-            // // 	asset_manager.process_deferred_queue();
-            // // 	gpu.process_work_queue();
-            // // }
-            // // println!("Loaded B-52");
-            //          while Arc::ptr_eq(
-            // 	&a.get(&asset_manager),
-            // 	&scene_placeholder,
-            // ) {
-            // 	asset_manager.process_deferred_queue();
-            // 	gpu.process_work_queue();
-            // 	// std::thread::sleep(std::time::Duration::from_millis(10));
-            // }
-            // let mut _component_registry = component_registry.lock();
+
 
             let dims = (NUM_CUBES as f64).powf(1.0 / 3.0).ceil() as u32;
-            // let mut _rendering_system = rendering_system.lock();
-            // let num_cubes_per_thread =
-            //     (NUM_CUBES as f32 / rayon::current_num_threads() as f32).ceil() as usize;
-            // let mut current_thread_idx = 0;
+
             for i in 0..NUM_CUBES {
                 let x = (i as u32 % dims) as f32;
                 let y = ((i as u32 / dims) % dims) as f32;
@@ -624,7 +604,7 @@ impl ApplicationHandler for App {
                         gpu,
                         &self.asset_manager,
                         &mut self.rendering_system.lock(),
-                        self.transform_compute.model_matrix_buffer.clone(),
+                        &self.transform_compute.matrix_buffer,
                     );
                 }
                 rcx.build_command_buffer_perf.start();
@@ -802,8 +782,9 @@ impl ApplicationHandler for App {
         self.update_render.start();
 
         let mut rendering_system = self.rendering_system.lock();
-        let renderer_updated = rendering_system
-            .compute_renderers(&mut builder, &self.transform_compute.model_matrix_buffer);
+        let renderer_updated = rendering_system.compute_renderers(
+            &mut builder,
+            &self.transform_compute.matrix_buffer);
         self.update_render.stop();
 
         let command_buffer = builder.build().unwrap();
@@ -985,7 +966,7 @@ impl ApplicationHandler for App {
                 // 	Vec3::Y,
                 // 	angle + std::f32::consts::FRAC_PI_2,
                 // ));
-                b52.rotate_by(glam::Quat::from_axis_angle(Vec3::Y, 0.2 * elapsed));
+                // b52.rotate_by(glam::Quat::from_axis_angle(Vec3::Y, 0.2 * elapsed));
             }
         }
 

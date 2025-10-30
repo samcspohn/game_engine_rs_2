@@ -393,9 +393,9 @@ impl GPUManager {
         drop(work_items);
         let ret = !items.is_empty();
         for item in items {
-            println!("Processing GPU work item");
+            // println!("Processing GPU work item");
             item.call(self);
-            println!("GPU work item completed");
+            // println!("GPU work item completed");
         }
         ret
     }

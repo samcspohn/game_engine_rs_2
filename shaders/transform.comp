@@ -31,10 +31,20 @@ layout(set = 1, binding = 3) buffer UFlags {
 layout(set = 1, binding = 4) buffer UParentIndices {
     uint u_parent_indices[];
 };
-// layout(set = 1, binding = 5) buffer DirtyL2 { uint dirty_l2[]; };
-layout(set = 2, binding = 0) buffer ModelMatrices {
-    mat4 model_matrices[];
+
+struct MatrixData {
+    mat4 model;
+    mat3 normal;
+    mat4 mvp;
 };
+
+// layout(set = 1, binding = 5) buffer DirtyL2 { uint dirty_l2[]; };
+layout(set = 2, binding = 0) buffer _MatrixData {
+    MatrixData m[];
+};
+// layout(set = 2, binding = 1) buffer NormalMatrices {
+//     mat3 normal_matrices[];
+// };
 
 layout(set = 3, binding = 0) uniform PushConstants {
     uint stage; // 0 = apply updates, 1 = compute matrices
@@ -149,13 +159,20 @@ void main() {
             if (idx >= pc.count) {
                 return;
             }
+            // mat4 normal_matrix = rotate(rotations[idx]) * scale(scales[idx]);
             mat4 model_matrix = translate(positions[idx]) * rotate(rotations[idx]) * scale(scales[idx]);
             uint parent = parent_indices[idx];
             while (parent != 0xFFFFFFFF) {
+                // normal_matrix = rotate(rotations[parent]) * scale(scales[parent]) * normal_matrix;
                 model_matrix = translate(positions[parent]) * rotate(rotations[parent]) * scale(scales[parent]) * model_matrix;
                 parent = parent_indices[parent];
             }
-            model_matrices[idx] = model_matrix;
+            // mat3 normal_matrix = mat3(model_matrix);
+            // normal_matrices[idx] = inverse(transpose(normal_matrix));
+            // normal_matrices[idx] = inverse(transpose(mat3(model_matrix)));
+            // model_matrices[idx] = model_matrix;
+            m[idx].model = model_matrix;
+            m[idx].normal = inverse(transpose(mat3(model_matrix)));
             // model_matrices[idx] = get_global_matrix(idx);
             // model_matrices[idx] =
             //     compute_model_matrix(positions[idx], rotations[idx], scales[idx]);

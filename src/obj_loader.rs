@@ -6,6 +6,7 @@ use std::{
     },
 };
 
+use gltf::mesh::util::colors;
 use parking_lot::Mutex;
 use vulkano::buffer::{BufferUsage, Subbuffer};
 
@@ -26,6 +27,7 @@ pub struct MeshBuffers {
     pub vertex_buffer: GpuVec<[f32; 3]>,
     pub normal_buffer: GpuVec<[f32; 3]>,
     pub tex_coord_buffer: GpuVec<[f32; 2]>,
+    pub color_buffer: GpuVec<[u8; 4]>,
     pub index_buffer: GpuVec<u32>,
 }
 
@@ -35,6 +37,7 @@ impl MeshBuffers {
             vertex_buffer: GpuVec::new(gpu, BufferUsage::VERTEX_BUFFER, true),
             normal_buffer: GpuVec::new(gpu, BufferUsage::VERTEX_BUFFER, true),
             tex_coord_buffer: GpuVec::new(gpu, BufferUsage::VERTEX_BUFFER, true),
+            color_buffer: GpuVec::new(gpu, BufferUsage::VERTEX_BUFFER, true),
             index_buffer: GpuVec::new(gpu, BufferUsage::INDEX_BUFFER, true),
         }
     }
@@ -49,6 +52,7 @@ impl MeshBuffers {
         ret |= self.vertex_buffer.upload_delta(gpu, builder);
         ret |= self.normal_buffer.upload_delta(gpu, builder);
         ret |= self.tex_coord_buffer.upload_delta(gpu, builder);
+        ret |= self.color_buffer.upload_delta(gpu, builder);
         ret |= self.index_buffer.upload_delta(gpu, builder);
         ret
     }
@@ -58,6 +62,7 @@ impl MeshBuffers {
         vertices: &[[f32; 3]],
         normals: &[[f32; 3]],
         tex_coords: &[[f32; 2]],
+        colors: &[[u8; 4]],
         indices: &[u32],
     ) -> (u32, u32) {
         if self.vertex_buffer.data_len() > u32::MAX as usize {
@@ -77,6 +82,9 @@ impl MeshBuffers {
         for t in tex_coords {
             self.tex_coord_buffer.push_data(*t);
         }
+        for c in colors {
+            self.color_buffer.push_data(*c);
+        }
         for i in indices {
             self.index_buffer.push_data(*i);
         }
@@ -91,6 +99,7 @@ pub struct Mesh {
     pub vertices: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub tex_coords: Vec<[f32; 2]>,
+    pub colors: Vec<[u8; 4]>,
     pub indices: Vec<u32>,
 
     // // buffers:
@@ -98,7 +107,7 @@ pub struct Mesh {
     // pub normal_buffer: Subbuffer<[[f32; 3]]>,
     // pub tex_coord_buffer: Subbuffer<[[f32; 2]]>,
     // pub index_buffer: Subbuffer<[u32]>,
-    // pub texture: Arc<Mutex<Option<AssetHandle<Texture>>>>,
+    pub texture: Option<AssetHandle<Texture>>,
 
     // global offsets for indirect drawing
     pub vertex_offset: u32,
@@ -133,6 +142,7 @@ impl Asset for Model {
             let mut vertices = Vec::new();
             let mut normals = Vec::new();
             let mut tex_coords = Vec::new();
+            let mut colors = Vec::new();
             let mut indices = Vec::new();
 
             let mesh = model.mesh;
@@ -171,23 +181,105 @@ impl Asset for Model {
                 }
             }
 
+            // process vertex colors (if any)
+            if !mesh.vertex_color.is_empty() {
+                for i in (0..mesh.vertex_color.len()).step_by(3) {
+                    colors.push([
+                        (mesh.vertex_color[i] * 255.0) as u8,
+                        (mesh.vertex_color[i + 1] * 255.0) as u8,
+                        (mesh.vertex_color[i + 2] * 255.0) as u8,
+                        255,
+                    ]);
+                }
+            } else {
+                // If no colors provided, fill with white
+                for _ in 0..vertices.len() {
+                    colors.push([255, 255, 255, 255]);
+                }
+            }
+
             // Process indices with offset for multiple models
             for index in mesh.indices {
                 indices.push(index);
             }
             let (vertex_offset, index_offset) = if let Some(buffers) = MESH_BUFFERS.lock().as_mut()
             {
-                buffers.add_mesh(&vertices, &normals, &tex_coords, &indices)
+                buffers.add_mesh(&vertices, &normals, &tex_coords, &colors, &indices)
             } else {
                 panic!("MESH_BUFFERS not initialized");
             };
+
+            // let verts = vertices.clone();
+            // let norms = normals.clone();
+            // let texs = tex_coords.clone();
+            // let inds = indices.clone();
+
+            // println!("Creating GPU buffers for OBJ");
+            // let vertex_buffer = gpu
+            //     .enqueue_work(move |g| {
+            //         g.buffer_from_iter(verts.iter().cloned(), BufferUsage::VERTEX_BUFFER)
+            //     })
+            //     .wait()
+            //     .unwrap();
+            // println!("Created vertex buffer");
+            // let normal_buffer = gpu
+            //     .enqueue_work(move |g| {
+            //         g.buffer_from_iter(norms.iter().cloned(), BufferUsage::VERTEX_BUFFER)
+            //     })
+            //     .wait()
+            //     .unwrap();
+            // println!("Created normal buffer");
+            // let tex_coord_buffer = gpu
+            //     .enqueue_work(move |g| {
+            //         g.buffer_from_iter(texs.iter().cloned(), BufferUsage::VERTEX_BUFFER)
+            //     })
+            //     .wait()
+            //     .unwrap();
+            // println!("Created tex coord buffer");
+            // let index_buffer = gpu
+            //     .enqueue_work(move |g| {
+            //         g.buffer_from_iter(inds.iter().cloned(), BufferUsage::INDEX_BUFFER)
+            //     })
+            //     .wait()
+            //     .unwrap();
+            // println!("Created index buffer");
+
+            let mut texture = None;
+            if let Some(mat_id) = mesh.material_id.as_ref() {
+                if let Some(material) = materials.get(*mat_id) {
+                    if let Some(diffuse_texture) = material.diffuse_texture.clone() {
+                        println!("Loading diffuse texture for mesh: {:?}", diffuse_texture);
+                        let tex_path = if Path::new(&diffuse_texture).is_absolute() {
+                            diffuse_texture
+                        } else {
+                            let mut p = path.parent().unwrap_or(Path::new("")).to_path_buf();
+                            p.push(diffuse_texture);
+                            p.to_string_lossy().to_string()
+                        };
+
+                        texture = Some(
+                            asset
+                                .enqueue_work(move |a| a.load_asset::<Texture>(&tex_path, None))
+                                .wait()
+                                .unwrap(),
+                        );
+                    } else {
+                        println!("No diffuse texture for material {}", mat_id);
+                    }
+                } else {
+                    println!("Invalid material_id {} for mesh", mat_id);
+                }
+            }
+
             let mesh = Mesh {
                 vertices,
                 normals,
                 tex_coords,
+                colors,
                 indices,
                 vertex_offset,
                 index_offset,
+                texture,
                 // vertex_buffer,
                 // normal_buffer,
                 // tex_coord_buffer,
@@ -231,6 +323,7 @@ impl Model {
         let vertices = vec![[0.0, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, 0.5, 0.0]];
         let normals = vec![[0.0, 0.0, 1.0]; 3];
         let tex_coords = vec![[0.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let colors = vec![[255, 255, 255, 255]; 3];
         let indices = vec![0, 1, 2];
 
         // let vertex_buffer =
@@ -242,7 +335,7 @@ impl Model {
         // let index_buffer = gpu.buffer_from_iter(indices.iter().cloned(), BufferUsage::INDEX_BUFFER);
 
         let (vertex_offset, index_offset) = if let Some(buffers) = MESH_BUFFERS.lock().as_mut() {
-            buffers.add_mesh(&vertices, &normals, &tex_coords, &indices)
+            buffers.add_mesh(&vertices, &normals, &tex_coords, &colors, &indices)
         } else {
             panic!("MESH_BUFFERS not initialized");
         };
@@ -250,6 +343,7 @@ impl Model {
             vertices,
             normals,
             tex_coords,
+            colors,
             indices,
             vertex_offset,
             index_offset,
@@ -257,8 +351,23 @@ impl Model {
             // normal_buffer,
             // tex_coord_buffer,
             // index_buffer,
-            // texture: Arc::new(Mutex::new(None)),
+            texture: None,
         };
         Self { meshes: vec![mesh] }
+    }
+}
+
+impl Mesh {
+    pub fn new() -> Self {
+        Self {
+            vertices: Vec::new(),
+            normals: Vec::new(),
+            tex_coords: Vec::new(),
+            colors: Vec::new(),
+            indices: Vec::new(),
+            vertex_offset: 0,
+            index_offset: 0,
+            texture: None,
+        }
     }
 }

@@ -27,11 +27,11 @@ use vulkano::{
     sync::GpuFuture,
 };
 
-use crate::{gpu_manager::GPUManager, MAX_FRAMES_IN_FLIGHT};
+use crate::{MAX_FRAMES_IN_FLIGHT, gpu_manager::GPUManager};
 
 use super::{TransformComponent, TransformHierarchy};
 
-mod cs {
+pub mod cs {
     vulkano_shaders::shader! {
         ty: "compute",
         path: "shaders/transform.comp"
@@ -215,7 +215,7 @@ pub struct PerfCounters {
 
 pub struct TransformCompute {
     pipeline: Arc<ComputePipeline>,
-    pub model_matrix_buffer: Subbuffer<[[[f32; 4]; 4]]>,
+    pub matrix_buffer: Subbuffer<[cs::MatrixData]>,
     transform_buffers: TransformBuffers,
     // update_buffers: TransformUpdateBuffers,
     parent_updates: Subbuffer<[u32]>,
@@ -244,7 +244,7 @@ impl TransformCompute {
             ComputePipelineCreateInfo::stage_layout(stage, layout),
         )
         .unwrap();
-        let model_matrix_buffer: Subbuffer<[[[f32; 4]; 4]]> = gpu.buffer_array(
+        let matrix_buffer: Subbuffer<[cs::MatrixData]> = gpu.buffer_array(
             1,
             MemoryTypeFilter::PREFER_DEVICE,
             BufferUsage::STORAGE_BUFFER
@@ -255,7 +255,7 @@ impl TransformCompute {
 
         Self {
             pipeline,
-            model_matrix_buffer,
+            matrix_buffer,
             transform_buffers: TransformBuffers::new(gpu),
             // update_buffers: TransformUpdateBuffers::new(gpu),
             parent_updates: gpu.buffer_array(
@@ -384,7 +384,7 @@ impl TransformCompute {
         // 4 flags per tranform, 1 bit each for pos, rot, scale, parent
         // 8 transforms per u32
         let mut ret = false;
-        if self.model_matrix_buffer.len() < hierarchy.positions.len() as u64 {
+        if self.matrix_buffer.len() < hierarchy.positions.len() as u64 {
             self.transform_buffers
                 .resize(gpu, hierarchy.metadata.len() as u64, builder);
             // self.update_buffers
@@ -397,7 +397,7 @@ impl TransformCompute {
             for buf in &mut self.staging_buffers {
                 buf.resize(gpu, hierarchy.metadata.len() as u64);
             }
-            self.model_matrix_buffer = gpu.buffer_array(
+            self.matrix_buffer = gpu.buffer_array(
                 hierarchy.metadata.len().next_power_of_two() as u64,
                 MemoryTypeFilter::PREFER_DEVICE,
                 BufferUsage::STORAGE_BUFFER
@@ -427,10 +427,14 @@ impl TransformCompute {
             //     // gpu_future.cleanup_finished();
             // };
             self.perf_counters.aquire_bufs.start();
-            let pos_cell = SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].position));
-            let rot_cell = SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].rotation));
-            let scale_cell = SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].scale));
-            let flags_cell = SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].flags));
+            let pos_cell =
+                SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].position));
+            let rot_cell =
+                SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].rotation));
+            let scale_cell =
+                SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].scale));
+            let flags_cell =
+                SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].flags));
             self.perf_counters.aquire_bufs.stop();
             // let dirty_l2 = SyncUnsafeCell::new(self.staging_buffers[sbi].dirty_l2.write().unwrap());
             let _hierarchy = SyncUnsafeCell::new(hierarchy);
@@ -623,10 +627,7 @@ impl TransformCompute {
                 let set2 = DescriptorSet::new(
                     gpu.desc_alloc.clone(),
                     layout2.clone(),
-                    [WriteDescriptorSet::buffer(
-                        0,
-                        self.model_matrix_buffer.clone(),
-                    )],
+                    [WriteDescriptorSet::buffer(0, self.matrix_buffer.clone())],
                     [],
                 )
                 .unwrap();

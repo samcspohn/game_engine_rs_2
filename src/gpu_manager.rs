@@ -29,6 +29,7 @@ use vulkano::{
     format::Format,
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
+    pipeline::cache::{PipelineCache, PipelineCacheCreateInfo},
     query::{QueryPool, QueryPoolCreateInfo, QueryResultFlags, QueryType},
     swapchain::Surface,
     sync::{GpuFuture, PipelineStage},
@@ -115,7 +116,7 @@ pub struct GPUManager {
     pub cmd_alloc: Arc<StandardCommandBufferAllocator>,
     pub mem_alloc: Arc<StandardMemoryAllocator>,
     pub desc_alloc: Arc<StandardDescriptorSetAllocator>,
-    // pub pipeline_cache: Arc<PipelineCache>,
+    pub pipeline_cache: Arc<PipelineCache>,
     // pub sub_alloc: Arc<SubbufferAllocator>,
     // pub storage_alloc: Arc<SubbufferAllocator>,
     // pub ind_alloc: Arc<SubbufferAllocator>,
@@ -228,6 +229,37 @@ impl GPUManager {
             device.clone(),
             Default::default(),
         ));
+
+        // Create or load pipeline cache from disk
+        let pipeline_cache = {
+            let cache_path = std::path::Path::new("pipeline_cache.bin");
+            let cache_data = if cache_path.exists() {
+                match std::fs::read(cache_path) {
+                    Ok(data) => {
+                        println!("Loaded pipeline cache from disk ({} bytes)", data.len());
+                        data
+                    }
+                    Err(e) => {
+                        println!("Failed to read pipeline cache: {}", e);
+                        Vec::new()
+                    }
+                }
+            } else {
+                println!("No pipeline cache found, creating new one");
+                Vec::new()
+            };
+
+            unsafe {
+                PipelineCache::new(
+                    device.clone(),
+                    PipelineCacheCreateInfo {
+                        initial_data: cache_data,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+            }
+        };
         // let sub_alloc = SubbufferAllocator::new(
         //     mem_alloc.clone(),
         //     SubbufferAllocatorCreateInfo {
@@ -303,7 +335,7 @@ impl GPUManager {
             cmd_alloc,
             mem_alloc,
             desc_alloc,
-            // pipeline_cache,
+            pipeline_cache,
             // sub_alloc: Arc::new(sub_alloc),
             // storage_alloc: Arc::new(storage_alloc),
             // ind_alloc: Arc::new(ind_alloc),
@@ -594,12 +626,24 @@ impl GPUManager {
         &self,
         usage: CommandBufferUsage,
     ) -> AutoCommandBufferBuilder<PrimaryAutoCommandBuffer> {
-        AutoCommandBufferBuilder::primary(
+        unsafe { AutoCommandBufferBuilder::primary_unchecked(
             self.cmd_alloc.clone(),
             self.queue.queue_family_index(),
             usage,
         )
-        .unwrap()
+        .unwrap() }
+    }
+
+    pub fn save_pipeline_cache(&self) {
+        match self.pipeline_cache.get_data() {
+            Ok(data) => {
+                match std::fs::write("pipeline_cache.bin", &data) {
+                    Ok(_) => println!("Pipeline cache saved ({} bytes)", data.len()),
+                    Err(e) => eprintln!("Failed to save pipeline cache: {}", e),
+                }
+            }
+            Err(e) => eprintln!("Failed to get pipeline cache data: {}", e),
+        }
     }
 
     // pub fn submit_command_buffer<C>(&self, cmd: C) -> impl GpuFuture

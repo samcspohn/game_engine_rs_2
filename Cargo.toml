@@ -34,6 +34,6 @@ serde = { version = "1.0.228", features = ["serde_derive"] }
 serde_json = "1.0.145"
 thread-priority = "3.0.0"
 tobj = "4.0.3"
-vulkano = "0.35.2"
+vulkano = {version = "0.35.2",  features = ["document_unchecked"] }
 vulkano-shaders = "0.35.0"
 winit = "0.30.12"

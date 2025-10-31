@@ -166,7 +166,7 @@ impl RenderingSystem {
         .unwrap();
         let pipeline = ComputePipeline::new(
             gpu.device.clone(),
-            None,
+            Some(gpu.pipeline_cache.clone()),
             ComputePipelineCreateInfo::stage_layout(stage, layout),
         )
         .unwrap();
@@ -355,7 +355,7 @@ impl RenderingSystem {
 
         ret |= self.transform_ids_buffer.resize_buffer(
             // self.mvp_count.load(Ordering::SeqCst) as usize,
-            1 << 21,
+            self.mvp_count.load(Ordering::SeqCst) as usize,
             &self.gpu,
             builder,
         );

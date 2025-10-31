@@ -31,33 +31,32 @@ pub struct RenderData {
 }
 
 pub fn render_thread_main(gpu: Arc<GPUManager>, render_receiver: Receiver<RenderData>) {
-    let mut frames_in_flight = (0..MAX_FRAMES_IN_FLIGHT)
-        .map(|_| Some(sync::now(gpu.device.clone()).boxed()))
-        .collect::<Vec<_>>();
-    let mut frame_index: usize = 0;
+    // let mut frames_in_flight = (0..MAX_FRAMES_IN_FLIGHT)
+    //     .map(|_| Some(sync::now(gpu.device.clone()).boxed()))
+    //     .collect::<Vec<_>>();
+    let mut previous_frame_future = sync::now(gpu.device.clone()).boxed();
+    // let mut frame_index: usize = 0;
     loop {
         // Receive render commands
-        match render_receiver.try_recv() {
+        match render_receiver.recv() {
             Ok(mut rd) => {
                 // println!(
                 //     "image_num: {} / frames_in_flight: {}",
                 //     rd.image_num,
                 //     frames_in_flight.len()
                 // );
-                for i in 0..frames_in_flight.len() {
-                    // if i != frame_index {
-                    frames_in_flight[i].as_mut().unwrap().cleanup_finished();
-                    // }
-                }
+                // for i in 0..frames_in_flight.len() {
+                //     // if i != frame_index {
+                //     frames_in_flight[i].as_mut().unwrap().cleanup_finished();
+                //     // }
+                // }
                 // frames_in_flight[frame_index]
                 //     .as_mut()
                 //     .unwrap()
                 //     .cleanup_finished();
-                let mut after_cmd_future: Box<dyn GpuFuture> = frames_in_flight[frame_index]
-                    .take()
-                    .unwrap()
-                    .join(rd.aquire_future)
-                    .boxed();
+                previous_frame_future.cleanup_finished();
+                let mut after_cmd_future: Box<dyn GpuFuture> =
+                    previous_frame_future.join(rd.aquire_future).boxed();
 
                 for cmd in rd.commands.drain(..) {
                     after_cmd_future = after_cmd_future
@@ -80,11 +79,13 @@ pub fn render_thread_main(gpu: Arc<GPUManager>, render_receiver: Receiver<Render
                 // 		rd.image_view.clone(),
                 // 	);
                 // }
-                for i in 0..frames_in_flight.len() {
-                    if i != frame_index {
-                        frames_in_flight[i].as_mut().unwrap().cleanup_finished();
-                    }
-                }
+                // for i in 0..frames_in_flight.len() {
+                //     if i != frame_index {
+                //         frames_in_flight[i].as_mut().unwrap().cleanup_finished();
+                //     }
+                // }
+                //            previous_frame_future
+                // .cleanup_finished();
                 let future = after_cmd_future
                     .then_swapchain_present(
                         gpu.queue.clone(),
@@ -94,19 +95,22 @@ pub fn render_thread_main(gpu: Arc<GPUManager>, render_receiver: Receiver<Render
                         ),
                     )
                     .then_signal_fence_and_flush();
-                for i in 0..frames_in_flight.len() {
-                    if i != frame_index {
-                        frames_in_flight[i].as_mut().unwrap().cleanup_finished();
-                    }
-                }
+                // for i in 0..frames_in_flight.len() {
+                //     if i != frame_index {
+                //         frames_in_flight[i].as_mut().unwrap().cleanup_finished();
+                //     }
+                // }
+                //            previous_frame_future
+                // .cleanup_finished();
 
                 match future.map_err(Validated::unwrap) {
                     Ok(future) => {
-                        frames_in_flight[frame_index] = Some(future.boxed());
+                        previous_frame_future = future.boxed();
                     }
                     Err(e) => {
                         eprintln!("Failed to flush future: {:?}", e);
-                        frames_in_flight[frame_index] = Some(sync::now(gpu.device.clone()).boxed());
+                        // frames_in_flight[frame_index] = Some(sync::now(gpu.device.clone()).boxed());
+                        previous_frame_future = sync::now(gpu.device.clone()).boxed();
                     }
                 }
                 //            let prev_frame_index = frame_index.wrapping_sub(1) % MAX_FRAMES_IN_FLIGHT as usize;
@@ -114,26 +118,33 @@ pub fn render_thread_main(gpu: Arc<GPUManager>, render_receiver: Receiver<Render
                 // .as_mut()
                 // .unwrap()
                 // .cleanup_finished();
-                for i in 0..frames_in_flight.len() {
-                    if i != frame_index {
-                        frames_in_flight[i].as_mut().unwrap().cleanup_finished();
-                    }
-                }
-                frame_index = (frame_index + 1) % MAX_FRAMES_IN_FLIGHT as usize;
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                for frame_future in frames_in_flight.iter_mut() {
-                    frame_future.as_mut().unwrap().cleanup_finished();
-                }
-                // let prev_frame_index = frame_index.wrapping_sub(1) % MAX_FRAMES_IN_FLIGHT as usize;
                 // for i in 0..frames_in_flight.len() {
-                //     if i != prev_frame_index {
+                //     if i != frame_index {
                 //         frames_in_flight[i].as_mut().unwrap().cleanup_finished();
                 //     }
                 // }
-                // std::thread::yield_now();
+                // frame_index = (frame_index + 1) % MAX_FRAMES_IN_FLIGHT as usize;
             }
+            // Err(std::sync::mpsc::TryRecvError::Empty) => {
+            //     // previous_frame_future.cleanup_finished();
+            //     // for frame_future in frames_in_flight.iter_mut() {
+            //     //     frame_future.as_mut().unwrap().cleanup_finished();
+            //     // }
+            //     // let prev_frame_index = frame_index.wrapping_sub(1) % MAX_FRAMES_IN_FLIGHT as usize;
+            //     // for i in 0..frames_in_flight.len() {
+            //     //     if i != prev_frame_index {
+            //     //         frames_in_flight[i].as_mut().unwrap().cleanup_finished();
+            //     //     }
+            //     // }
+            //     // std::thread::yield_now();
+            // }
             Err(_) => {
+                previous_frame_future.cleanup_finished();
+                // previous_frame_future
+                //     .then_signal_fence_and_flush()
+                //     .unwrap()
+                //     .wait(None)
+                //     .unwrap();
                 // Handle the error (e.g., channel closed)
                 break;
             }

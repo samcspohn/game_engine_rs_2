@@ -39,7 +39,7 @@ void main() {
     v_uv = uv;
     mat_id = rd.y;
     v_color = color;
-    v_normal = m[rd.x].normal * normal;
+    v_normal = normalize(m[rd.x].normal * normal);
     v_position = (m[rd.x].model * vec4(position, 1.0)).xyz;
     cam_pos = (inverse(cam.view) * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 }

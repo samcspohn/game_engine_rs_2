@@ -162,10 +162,12 @@ void main() {
             // mat4 normal_matrix = rotate(rotations[idx]) * scale(scales[idx]);
             mat4 model_matrix = translate(positions[idx]) * rotate(rotations[idx]) * scale(scales[idx]);
             uint parent = parent_indices[idx];
-            while (parent != 0xFFFFFFFF) {
+            uint sanity_counter = 0;
+            while (parent != 0xFFFFFFFF && sanity_counter < 100) {
                 // normal_matrix = rotate(rotations[parent]) * scale(scales[parent]) * normal_matrix;
                 model_matrix = translate(positions[parent]) * rotate(rotations[parent]) * scale(scales[parent]) * model_matrix;
                 parent = parent_indices[parent];
+                sanity_counter += 1;
             }
             // mat3 normal_matrix = mat3(model_matrix);
             // normal_matrices[idx] = inverse(transpose(normal_matrix));

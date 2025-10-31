@@ -190,7 +190,7 @@ impl RenderContext {
             // Finally, create the pipeline.
             GraphicsPipeline::new(
                 gpu.device.clone(),
-                None,
+                Some(gpu.pipeline_cache.clone()),
                 GraphicsPipelineCreateInfo {
                     stages: stages.into_iter().collect(),
                     vertex_input_state: Some(vertex_input_state),

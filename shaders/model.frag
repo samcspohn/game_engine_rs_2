@@ -16,14 +16,14 @@ layout(set = 0, binding = 2) uniform sampler2D textures[];
 const vec3 light_dir = normalize(vec3(1.0, 1.0, 1.0));
 
 void main() {
-    vec4 color = texture(textures[mat_id], v_uv);
+    vec4 color = texture(textures[mat_id], v_uv) * v_color;
     if (color.a < 0.1) {
         discard;
     }
-    float light_intensity = max(dot(normalize(v_normal), normalize(light_dir)), 0.0) + 0.3;
+    float light_intensity = max(dot(v_normal, light_dir), 0.0) + 0.3;
     float cam_distance = length(cam_pos - frag_pos);
-    light_intensity += 1.5 / (1.0 + 0.1 * cam_distance + 0.01 * cam_distance * cam_distance); // * dot(normalize(v_normal), normalize(-cam_pos));
+    // light_intensity += 1.5 / (1.0 + 0.1 * cam_distance + 0.01 * cam_distance * cam_distance); // * dot(normalize(v_normal), normalize(-cam_pos));
     color.rgb *= light_intensity;
-    f_color = color * v_color;
+    f_color = color;
     // f_color = vec4(1.0, 0.0, 0.0, 1.0);
 }

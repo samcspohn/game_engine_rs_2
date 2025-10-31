@@ -93,7 +93,12 @@ fn recursive_access_node(
                 .material()
                 .pbr_metallic_roughness()
                 .base_color_factor();
-
+            if base_color[3] < 0.01 {
+				println!(
+					"{}    Warning: Base color alpha is less than 1.0 ({})",
+					indent, mesh.name().unwrap_or("")
+				);
+			}
             // let alpha = primitive.material().
             let _base_color_texture = texture_index.and_then(|idx| images.get(idx as usize));
             let name_path = format!(
@@ -115,7 +120,7 @@ fn recursive_access_node(
                                         tex.width,
                                         tex.height,
                                         crate::texture::get_format(tex.format),
-                                        Some(base_color),
+                                        None,
                                     )
                                 })
                                 .wait()
@@ -127,13 +132,18 @@ fn recursive_access_node(
                 )
                 // println!("{}   Base Color Texture: {}x{} {:?}", indent, tex.width, tex.height, tex.format);
             } else {
-            	Some(assets.enqueue_work(move |a| {
-             	a.load_asset_custom("no-tex", move |g, _a| {
-					 Ok(g.enqueue_work(move |g| {
-						 crate::texture::Texture::white(g)
-						}).wait().unwrap())
-				 })
-             }).wait().unwrap())
+                Some(
+                    assets
+                        .enqueue_work(move |a| {
+                            a.load_asset_custom("no-tex", move |g, _a| {
+                                Ok(g.enqueue_work(move |g| crate::texture::Texture::white(g))
+                                    .wait()
+                                    .unwrap())
+                            })
+                        })
+                        .wait()
+                        .unwrap(),
+                )
             };
 
             let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
@@ -163,11 +173,24 @@ fn recursive_access_node(
             }
 
             if let Some(colors_iter) = reader.read_colors(0) {
-                _mesh.colors.extend(colors_iter.into_rgba_u8())
+                _mesh.colors.extend(colors_iter.into_rgba_f32().map(|col| {
+                    [
+                        (col[0] * base_color[0] * 255.0) as u8,
+                        (col[1] * base_color[1] * 255.0) as u8,
+                        (col[2] * base_color[2] * 255.0) as u8,
+                        (col[3] * base_color[3] * 255.0) as u8,
+                    ]
+                }))
             } else {
-                _mesh
-                    .colors
-                    .extend(std::iter::repeat([255, 255, 255, 255]).take(_mesh.vertices.len()));
+                _mesh.colors.extend(
+                    std::iter::repeat([
+                        (255.0 * base_color[0]) as u8,
+                        (255.0 * base_color[1]) as u8,
+                        (255.0 * base_color[2]) as u8,
+                        (255.0 * base_color[3]) as u8,
+                    ])
+                    .take(_mesh.vertices.len()),
+                );
             }
 
             // Read indices and offset them by the base vertex index

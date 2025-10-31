@@ -240,7 +240,7 @@ impl TransformCompute {
         .unwrap();
         let pipeline = ComputePipeline::new(
             gpu.device.clone(),
-            None,
+            Some(gpu.pipeline_cache.clone()),
             ComputePipelineCreateInfo::stage_layout(stage, layout),
         )
         .unwrap();
@@ -259,7 +259,7 @@ impl TransformCompute {
             transform_buffers: TransformBuffers::new(gpu),
             // update_buffers: TransformUpdateBuffers::new(gpu),
             parent_updates: gpu.buffer_array(
-                1,
+                2,
                 MemoryTypeFilter::PREFER_DEVICE,
                 BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
             ),
@@ -526,7 +526,7 @@ impl TransformCompute {
             let parent_updates_len = parent_updates.len();
             let parent_indices = gpu
                 .sub_alloc(BufferUsage::STORAGE_BUFFER)
-                .allocate_slice((parent_updates_len * 2).max(1) as u64)
+                .allocate_slice((parent_updates_len * 2).max(2) as u64)
                 .unwrap();
             {
                 let mut write = parent_indices.write().unwrap();

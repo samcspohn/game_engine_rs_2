@@ -218,7 +218,7 @@ pub struct TransformCompute {
     pub matrix_buffer: Subbuffer<[cs::MatrixData]>,
     transform_buffers: TransformBuffers,
     // update_buffers: TransformUpdateBuffers,
-    parent_updates: Subbuffer<[u32]>,
+    parent_updates: Subbuffer<[[u32;2]]>,
     staging_buffers: Vec<TransformUpdateBuffers>, // TODO: zero flags in shader/avoid writing 0s to flags
     pub staging_buffer_index: usize,
     pub perf_counters: PerfCounters,
@@ -259,7 +259,7 @@ impl TransformCompute {
             transform_buffers: TransformBuffers::new(gpu),
             // update_buffers: TransformUpdateBuffers::new(gpu),
             parent_updates: gpu.buffer_array(
-                2,
+                1,
                 MemoryTypeFilter::PREFER_DEVICE,
                 BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
             ),
@@ -390,7 +390,7 @@ impl TransformCompute {
             // self.update_buffers
             //     .resize(gpu, hierarchy.metadata.len() as u64);
             self.parent_updates = gpu.buffer_array(
-                (hierarchy.metadata.len() * 2).max(1) as u64,
+                hierarchy.metadata.len().max(1) as u64,
                 MemoryTypeFilter::PREFER_DEVICE,
                 BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
             );

@@ -51,6 +51,7 @@ void main() {
     }
     // vec3 base_color = materials[mat_id].base_color.rgb * v_color.rgb;
     vec4 color = v_color * materials[mat_id].base_color;
+    color.rgb *= 0.3; // Ambient term
     uint albedo = materials[mat_id].albedo_tex_index;
     if (albedo != uint(-1)) {
         color *= texture(textures[albedo], v_uv);
@@ -93,7 +94,7 @@ void main() {
     }
 
     // Calculate diffuse lighting using the correct normal
-    float light_intensity = max(dot(normal, light_dir), 0.0) + 0.3;
+    float light_intensity = max(dot(normal, light_dir), 0.0) * 2.0;
     float cam_distance = length(cam_pos - frag_pos);
     // light_intensity += 1.5 / (1.0 + 0.1 * cam_distance + 0.01 * cam_distance * cam_distance); // * dot(normalize(v_normal), normalize(-cam_pos));
     color.rgb += light_intensity * base_color;

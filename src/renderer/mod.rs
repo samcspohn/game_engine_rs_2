@@ -5,6 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
+    u32,
 };
 
 use egui::layers;
@@ -61,7 +62,9 @@ pub struct RenderingSystem {
     pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
     // buffers
     indirect_commands_buffer: GpuVec<DrawIndexedIndirectCommand>,
-    indirect_texture_vec: GpuVec<u32>, // texture per indirect draw command
+    // indirect_texture_vec: GpuVec<u32>, // texture per indirect draw command -> change to material per indirect draw command
+    indirect_material_vec: GpuVec<u32>, // material per indirect draw command
+    material_vec: GpuVec<crate::fs::Material>,
     texture_map: HashMap<u32, u32>, // texture asset_id -> texture idx
     registered_textures: Vec<AssetHandle<Texture>>, // to avoid duplicate texture loads
     renderer_buffer: GpuVec<cs::Renderer>,
@@ -178,11 +181,14 @@ impl RenderingSystem {
                 BufferUsage::INDIRECT_BUFFER | BufferUsage::STORAGE_BUFFER,
                 true,
             ),
-            indirect_texture_vec: GpuVec::new(
-				&gpu,
-				BufferUsage::STORAGE_BUFFER,
-				true,
-			),
+            //          indirect_texture_vec: GpuVec::new(
+            // 	&gpu,
+            // 	BufferUsage::STORAGE_BUFFER,
+            // 	true,
+            // ),
+            indirect_material_vec: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
+            material_vec: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
+            // material_vec: Vec::new(),
             texture_map: HashMap::new(),
             registered_textures: Vec::new(),
             renderer_buffer: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
@@ -240,6 +246,17 @@ impl RenderingSystem {
         }
         *self.model_map.get(&m_id).unwrap()
     }
+    fn get_or_register_texture(&mut self, tex: &Option<AssetHandle<Texture>>) -> u32 {
+        if let Some(tex) = tex {
+            *self.texture_map.entry(tex.asset_id).or_insert_with(|| {
+                let tex_idx = self.registered_textures.len() as u32;
+                self.registered_textures.push(tex.clone());
+                tex_idx
+            })
+        } else {
+            u32::MAX
+        }
+    }
     pub fn register_model(&mut self, model: AssetHandle<Model>, asset: Arc<Model>) {
         // let m_id = model.asset_id;
         // let m_idx = model.get(assets).id;
@@ -268,16 +285,25 @@ impl RenderingSystem {
                     vertex_offset: mesh.vertex_offset,
                     first_instance: 0,
                 });
-            let tex_idx = self
-                .texture_map
-                .entry(mesh.texture.unwrap_or_default().asset_id)
-                .or_insert_with(|| {
-                    let tex_idx = self.registered_textures.len() as u32;
-                    self.registered_textures
-                        .push(mesh.texture.unwrap_or_default().clone());
-                    tex_idx
-                });
-            self.indirect_texture_vec.push_data(*tex_idx);
+            if let Some(mat) = &mesh.material {
+                let albedo: u32 = self.get_or_register_texture(&mat.albedo_texture);
+                let normal = self.get_or_register_texture(&mat.normal_texture);
+                let spec = self.get_or_register_texture(&mat.specular_texture);
+                let mr = self.get_or_register_texture(&mat.metallic_roughness_texture);
+                let m = crate::fs::Material {
+                    albedo_tex_index: albedo,
+                    normal_tex_index: normal,
+                    specular_tex_index: spec,
+                    metallic_roughness_tex_index: mr,
+                    base_color: mat.base_color,
+                };
+                self.material_vec.push_data(m);
+                let mat_idx = (self.material_vec.data_len() - 1) as u32;
+                self.indirect_material_vec.push_data(mat_idx);
+            } else {
+                self.indirect_material_vec.push_data(u32::MAX);
+            }
+            // self.indirect_texture_vec.push_data(*tex_idx);
         }
         *self
             .model_indirect_buffer
@@ -377,9 +403,8 @@ impl RenderingSystem {
         ret |= self
             .indirect_commands_buffer
             .upload_delta(&self.gpu, builder);
-        ret |= self
-			.indirect_texture_vec
-			.upload_delta(&self.gpu, builder);
+        ret |= self.indirect_material_vec.upload_delta(&self.gpu, builder);
+        ret |= self.material_vec.upload_delta(&self.gpu, builder);
         // println!("ret/indirect_commands upload: {}", ret);
 
         if self.command_buffer.is_none() || ret || resized {
@@ -400,7 +425,7 @@ impl RenderingSystem {
                     WriteDescriptorSet::buffer(5, self.model_indirect_buffer.buf()),
                     WriteDescriptorSet::buffer(6, self.workgroup_sums_buffer.buf()),
                     WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.buf()),
-                    WriteDescriptorSet::buffer(8, self.indirect_texture_vec.buf()),
+                    WriteDescriptorSet::buffer(8, self.indirect_material_vec.buf()),
                     // WriteDescriptorSet::buffer(9, normal_matrices.clone()),
                 ],
                 [],
@@ -520,7 +545,7 @@ impl RenderingSystem {
                 WriteDescriptorSet::buffer(5, self.model_indirect_buffer.buf()),
                 WriteDescriptorSet::buffer(6, self.gpu.empty.clone()),
                 WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.buf()),
-                WriteDescriptorSet::buffer(8, self.indirect_texture_vec.buf()),
+                WriteDescriptorSet::buffer(8, self.indirect_material_vec.buf()),
             ],
             [],
         )
@@ -591,13 +616,22 @@ impl RenderingSystem {
         //         (tex.image.clone(), tex.sampler.clone())
         //     })
         //     .collect::<Vec<_>>();
-        let textures: Vec<_> = self
-			.registered_textures.iter()
-			.map(|texture_handle| {
-				let tex = texture_handle.get(assets);
-				(tex.image.clone(), tex.sampler.clone())
-			})
-			.collect();
+        let mut textures: Vec<_> = self
+            .registered_textures
+            .iter()
+            .map(|texture_handle| {
+                let tex = texture_handle.get(assets);
+                (tex.image.clone(), tex.sampler.clone())
+            })
+            .collect();
+        if textures.is_empty() {
+            let dummy_texture_handle = AssetHandle::<Texture>::default();
+            let tex = dummy_texture_handle.get(assets);
+            textures.push((tex.image.clone(), tex.sampler.clone()));
+        }
+        if self.material_vec.data_len() > 0 {
+        	println!("material 0: {:?}", self.material_vec.get_data(0).unwrap())
+        }
 
         let set = DescriptorSet::new_variable(
             self.gpu.desc_alloc.clone(),
@@ -606,7 +640,8 @@ impl RenderingSystem {
             [
                 WriteDescriptorSet::buffer(0, camera.clone()),
                 WriteDescriptorSet::buffer(1, matrix_data.clone()),
-                WriteDescriptorSet::image_view_sampler_array(2, 0, textures),
+                WriteDescriptorSet::buffer(2, self.material_vec.buf()),
+                WriteDescriptorSet::image_view_sampler_array(3, 0, textures),
             ],
             [],
         )

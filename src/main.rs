@@ -98,7 +98,7 @@ const MAX_FRAMES_IN_FLIGHT: u32 = 4;
 // 1 << 21 = 2,097,152
 // 1 << 22 = 4,194,304
 // 1 << 23 = 8,388,608
-const NUM_CUBES: usize = 1;
+const NUM_CUBES: usize = (1);
 struct FPS {
     frame_times: std::collections::VecDeque<f32>,
     frame_ages: std::collections::VecDeque<time::Instant>,
@@ -244,15 +244,15 @@ impl App {
             );
             bismarck_handle = Some(a);
 
-            // let _b52_entity_arc = b52_entity_arc.clone();
-            // let a = asset_manager.load_asset::<Scene>(
-            //     "/home/sspohn/Documents/b52.1-4.glb",
-            //     Some(Box::new(move |handle, arc_asset| {
-            //         // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
-            //         // *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
-            //     })),
-            // );
-            // b52_handle = Some(a);
+            let _b52_entity_arc = b52_entity_arc.clone();
+            let a = asset_manager.load_asset::<Scene>(
+                "/home/sspohn/Documents/b52.1-4.glb",
+                Some(Box::new(move |handle, arc_asset| {
+                    // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
+                    *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
+                })),
+            );
+            b52_handle = Some(a);
 
             let dims = (NUM_CUBES as f64).powf(1.0 / 3.0).ceil() as u32;
 
@@ -411,6 +411,7 @@ mod fs {
     vulkano_shaders::shader! {
         ty: "fragment",
         path: "shaders/model.frag",
+        custom_derives: [Clone, Copy, Debug]
     }
 }
 

@@ -11,7 +11,7 @@ use crate::{
     engine::Engine,
     obj_loader::{MESH_BUFFERS, Mesh, Model},
     renderer::_RendererComponent,
-    // texture::{self, Texture},
+    texture::Texture,
     transform::{_Transform, Transform},
 };
 
@@ -80,8 +80,9 @@ fn recursive_access_node(
         for primitive in mesh.primitives() {
             let mut _mesh = Mesh::new();
             // Extract base color texture (diffuse)
-            let texture_index = primitive
-                .material()
+            let mut mat = crate::obj_loader::Material::default();
+            let gltf_material = primitive.material();
+            let texture_index = gltf_material
                 .pbr_metallic_roughness()
                 .base_color_texture()
                 .map(|info| {
@@ -89,16 +90,17 @@ fn recursive_access_node(
                     let image = texture.source();
                     image.index()
                 });
-            let base_color = primitive
+            mat.base_color = primitive
                 .material()
                 .pbr_metallic_roughness()
                 .base_color_factor();
-            if base_color[3] < 0.01 {
-				println!(
-					"{}    Warning: Base color alpha is less than 1.0 ({})",
-					indent, mesh.name().unwrap_or("")
-				);
-			}
+            if mat.base_color[3] < 0.01 {
+                println!(
+                    "{}    Warning: Base color alpha is less than 0.01 ({})",
+                    indent,
+                    mesh.name().unwrap_or("")
+                );
+            }
             // let alpha = primitive.material().
             let _base_color_texture = texture_index.and_then(|idx| images.get(idx as usize));
             let name_path = format!(
@@ -107,50 +109,60 @@ fn recursive_access_node(
                 // mesh.name().unwrap_or(""),
                 texture_index.unwrap_or(0)
             );
-            _mesh.texture = if let Some(tex) = _base_color_texture {
+            mat.albedo_texture = if let Some(tex) = _base_color_texture {
                 let tex = tex.clone();
-                Some(
-                    assets
-                        .enqueue_work(move |a| {
-                            a.load_asset_custom(name_path.as_str(), move |g, _a| {
-                                Ok(g.enqueue_work(move |g| {
-                                    crate::texture::Texture::from_bytes(
-                                        g,
-                                        &tex.pixels,
-                                        tex.width,
-                                        tex.height,
-                                        crate::texture::get_format(tex.format),
-                                        None,
-                                    )
-                                })
-                                .wait()
-                                .unwrap())
-                            })
-                        })
-                        .wait()
-                        .unwrap(),
-                )
-                // println!("{}   Base Color Texture: {}x{} {:?}", indent, tex.width, tex.height, tex.format);
+                Some(Texture::load_custom(assets, name_path, tex))
             } else {
-                Some(
-                    assets
-                        .enqueue_work(move |a| {
-                            a.load_asset_custom("no-tex", move |g, _a| {
-                                Ok(g.enqueue_work(move |g| crate::texture::Texture::white(g))
-                                    .wait()
-                                    .unwrap())
-                            })
-                        })
-                        .wait()
-                        .unwrap(),
-                )
+                None
+            };
+            // Extract normal texture+
+            let _normal_texture = primitive
+                .material()
+                .normal_texture()
+                .map(|info| {
+                    let texture = info.texture();
+                    let image = texture.source();
+                    image.index()
+                })
+                .and_then(|idx| images.get(idx as usize));
+            let name_path = format!(
+                "{}._normtex_{}",
+                file_path,
+                // mesh.name().unwrap_or(""),
+                texture_index.unwrap_or(0)
+            );
+            mat.normal_texture = if let Some(tex) = _normal_texture {
+                let tex = tex.clone();
+                Some(Texture::load_custom(assets, name_path, tex))
+            } else {
+                None
             };
 
+            let metalic_roughness = gltf_material
+                .pbr_metallic_roughness()
+                .metallic_roughness_texture()
+                .map(|info| {
+                    let texture = info.texture();
+                    let image = texture.source();
+                    image.index()
+                })
+                .and_then(|idx| images.get(idx as usize));
+            let name_path = format!(
+                "{}._mrtex_{}",
+                file_path,
+                // mesh.name().unwrap_or(""),
+                texture_index.unwrap_or(0)
+            );
+            mat.metallic_roughness_texture = if let Some(tex) = metalic_roughness {
+                let tex = tex.clone();
+                Some(Texture::load_custom(assets, name_path, tex))
+            } else {
+                None
+            };
+
+            _mesh.material = Some(mat);
+
             let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-
-            // Track the base vertex index for this primitive
-            // let base_vertex = mesh.vertices.len() as u32;
-
             // Read positions
             if let Some(positions) = reader.read_positions() {
                 _mesh.vertices.extend(positions);
@@ -173,24 +185,11 @@ fn recursive_access_node(
             }
 
             if let Some(colors_iter) = reader.read_colors(0) {
-                _mesh.colors.extend(colors_iter.into_rgba_f32().map(|col| {
-                    [
-                        (col[0] * base_color[0] * 255.0) as u8,
-                        (col[1] * base_color[1] * 255.0) as u8,
-                        (col[2] * base_color[2] * 255.0) as u8,
-                        (col[3] * base_color[3] * 255.0) as u8,
-                    ]
-                }))
+                _mesh.colors.extend(colors_iter.into_rgba_u8())
             } else {
-                _mesh.colors.extend(
-                    std::iter::repeat([
-                        (255.0 * base_color[0]) as u8,
-                        (255.0 * base_color[1]) as u8,
-                        (255.0 * base_color[2]) as u8,
-                        (255.0 * base_color[3]) as u8,
-                    ])
-                    .take(_mesh.vertices.len()),
-                );
+                _mesh
+                    .colors
+                    .extend(std::iter::repeat([255, 255, 255, 255]).take(_mesh.vertices.len()));
             }
 
             // Read indices and offset them by the base vertex index

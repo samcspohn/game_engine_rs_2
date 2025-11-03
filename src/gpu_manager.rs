@@ -121,6 +121,7 @@ pub struct GPUManager {
     // pub storage_alloc: Arc<SubbufferAllocator>,
     // pub ind_alloc: Arc<SubbufferAllocator>,
     pub _sub_alloc: RwLock<HashMap<BufferUsage, Arc<SendSync<SubbufferAllocator>>>>,
+    pub _sub_alloc_ra: RwLock<HashMap<BufferUsage, Arc<SendSync<SubbufferAllocator>>>>,
     pub work_queue: GPUWorkQueue,
     pub surface_format: Format,
     pub image_count: u32,
@@ -340,6 +341,7 @@ impl GPUManager {
             // storage_alloc: Arc::new(storage_alloc),
             // ind_alloc: Arc::new(ind_alloc),
             _sub_alloc: RwLock::new(HashMap::new()),
+            _sub_alloc_ra: RwLock::new(HashMap::new()),
             work_queue: GPUWorkQueue::new(),
             surface_format,
             image_count,
@@ -370,6 +372,24 @@ impl GPUManager {
             )))
         };
         self._sub_alloc.write().insert(usage, alloc.clone());
+        alloc
+    }
+    pub fn sub_alloc_ra(&self, usage: BufferUsage) -> Arc<SendSync<SubbufferAllocator>> {
+        if let Some(alloc) = self._sub_alloc_ra.read().get(&(usage)) {
+            return alloc.clone();
+        }
+        let alloc = unsafe {
+            Arc::new(SendSync::new(SubbufferAllocator::new(
+                self.mem_alloc.clone(),
+                SubbufferAllocatorCreateInfo {
+                    buffer_usage: usage | BufferUsage::TRANSFER_SRC,
+                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                        | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                    ..Default::default()
+                },
+            )))
+        };
+        self._sub_alloc_ra.write().insert(usage, alloc.clone());
         alloc
     }
 

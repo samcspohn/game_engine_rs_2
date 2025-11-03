@@ -94,6 +94,35 @@ impl MeshBuffers {
 
 pub static MESH_BUFFERS: LazyLock<Mutex<Option<MeshBuffers>>> = LazyLock::new(|| Mutex::new(None));
 
+#[derive(Clone, Default)]
+pub struct Material {
+    pub base_color: [f32; 4],
+    pub albedo_texture: Option<AssetHandle<Texture>>,
+    pub normal_texture: Option<AssetHandle<Texture>>,
+    pub specular_texture: Option<AssetHandle<Texture>>,
+    pub metallic_roughness_texture: Option<AssetHandle<Texture>>,
+}
+use std::fmt::Debug;
+impl Debug for Material {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Material")
+            .field("base_color", &self.base_color)
+            .field(
+                "albedo_texture",
+                &self.albedo_texture.as_ref().map(|_| "Texture"),
+            )
+            .field(
+                "normal_texture",
+                &self.normal_texture.as_ref().map(|_| "Texture"),
+            )
+            .field(
+                "specular_texture",
+                &self.specular_texture.as_ref().map(|_| "Texture"),
+            )
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Mesh {
     pub vertices: Vec<[f32; 3]>,
@@ -107,7 +136,8 @@ pub struct Mesh {
     // pub normal_buffer: Subbuffer<[[f32; 3]]>,
     // pub tex_coord_buffer: Subbuffer<[[f32; 2]]>,
     // pub index_buffer: Subbuffer<[u32]>,
-    pub texture: Option<AssetHandle<Texture>>,
+    // pub texture: Option<AssetHandle<Texture>>,
+    pub material: Option<Material>,
 
     // global offsets for indirect drawing
     pub vertex_offset: u32,
@@ -244,9 +274,18 @@ impl Asset for Model {
             //     .unwrap();
             // println!("Created index buffer");
 
-            let mut texture = None;
+            let mut albedo_texture = None;
+            let mut _normal_texture = None;
+            let mut _specular_texture = None;
+            let mut base_color = [1.0, 1.0, 1.0, 1.0];
             if let Some(mat_id) = mesh.material_id.as_ref() {
                 if let Some(material) = materials.get(*mat_id) {
+                    if let Some(diffuse_color) = material.diffuse {
+                        base_color = [diffuse_color[0], diffuse_color[1], diffuse_color[2], 1.0];
+                    }
+                    if let Some(disolve) = material.dissolve {
+						base_color[3] = disolve;
+					}
                     if let Some(diffuse_texture) = material.diffuse_texture.clone() {
                         println!("Loading diffuse texture for mesh: {:?}", diffuse_texture);
                         let tex_path = if Path::new(&diffuse_texture).is_absolute() {
@@ -257,7 +296,7 @@ impl Asset for Model {
                             p.to_string_lossy().to_string()
                         };
 
-                        texture = Some(
+                        albedo_texture = Some(
                             asset
                                 .enqueue_work(move |a| a.load_asset::<Texture>(&tex_path, None))
                                 .wait()
@@ -266,10 +305,51 @@ impl Asset for Model {
                     } else {
                         println!("No diffuse texture for material {}", mat_id);
                     }
+                    if let Some(normal_texture) = material.normal_texture.clone() {
+                        println!("Loading diffuse texture for mesh: {:?}", normal_texture);
+                        let tex_path = if Path::new(&normal_texture).is_absolute() {
+                            normal_texture
+                        } else {
+                            let mut p = path.parent().unwrap_or(Path::new("")).to_path_buf();
+                            p.push(normal_texture);
+                            p.to_string_lossy().to_string()
+                        };
+
+                        _normal_texture = Some(
+                            asset
+                                .enqueue_work(move |a| a.load_asset::<Texture>(&tex_path, None))
+                                .wait()
+                                .unwrap(),
+                        );
+                    }
+                    if let Some(specular_texture) = material.specular_texture.clone() {
+                        println!("Loading specular texture for mesh: {:?}", specular_texture);
+                        let tex_path = if Path::new(&specular_texture).is_absolute() {
+                            specular_texture
+                        } else {
+                            let mut p = path.parent().unwrap_or(Path::new("")).to_path_buf();
+                            p.push(specular_texture);
+                            p.to_string_lossy().to_string()
+                        };
+
+                        _specular_texture = Some(
+                            asset
+                                .enqueue_work(move |a| a.load_asset::<Texture>(&tex_path, None))
+                                .wait()
+                                .unwrap(),
+                        );
+                    }
                 } else {
                     println!("Invalid material_id {} for mesh", mat_id);
                 }
             }
+            let material = Material {
+				base_color,
+				albedo_texture,
+				normal_texture: _normal_texture,
+				specular_texture: _specular_texture,
+				metallic_roughness_texture: None,
+			};
 
             let mesh = Mesh {
                 vertices,
@@ -279,7 +359,8 @@ impl Asset for Model {
                 indices,
                 vertex_offset,
                 index_offset,
-                texture,
+                material: Some(material),
+                // texture,
                 // vertex_buffer,
                 // normal_buffer,
                 // tex_coord_buffer,
@@ -351,7 +432,8 @@ impl Model {
             // normal_buffer,
             // tex_coord_buffer,
             // index_buffer,
-            texture: None,
+            // texture: None,
+            material: None,
         };
         Self { meshes: vec![mesh] }
     }
@@ -367,7 +449,8 @@ impl Mesh {
             indices: Vec::new(),
             vertex_offset: 0,
             index_offset: 0,
-            texture: None,
+            // texture: None,
+            material: None,
         }
     }
 }

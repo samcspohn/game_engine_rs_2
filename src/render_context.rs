@@ -175,7 +175,7 @@ impl RenderContext {
                 PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages);
             let binding = layout_create_info.set_layouts[0]
                 .bindings
-                .get_mut(&2)
+                .get_mut(&3)
                 .unwrap();
             binding.binding_flags |= DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT;
             binding.descriptor_count = 1024; // max number of textures

@@ -218,7 +218,7 @@ pub struct TransformCompute {
     pub matrix_buffer: Subbuffer<[cs::MatrixData]>,
     transform_buffers: TransformBuffers,
     // update_buffers: TransformUpdateBuffers,
-    parent_updates: Subbuffer<[[u32;2]]>,
+    parent_updates: Subbuffer<[[u32; 2]]>,
     staging_buffers: Vec<TransformUpdateBuffers>, // TODO: zero flags in shader/avoid writing 0s to flags
     pub staging_buffer_index: usize,
     pub perf_counters: PerfCounters,
@@ -426,6 +426,8 @@ impl TransformCompute {
             //     }
             //     // gpu_future.cleanup_finished();
             // };
+            let len = hierarchy.len();
+
             self.perf_counters.aquire_bufs.start();
             let pos_cell =
                 SyncUnsafeCell::new(Self::aquire_buf(&self.staging_buffers[sbi].position));
@@ -445,7 +447,6 @@ impl TransformCompute {
             let _flags = &flags_cell;
 
             // const OUTER: usize = 32;
-            let len = hierarchy.len();
             const INNER: usize = 32; // 32 transforms per flag u32
             let nt = rayon::current_num_threads().min(len.div_ceil(1024)).max(1);
             let outer = len.div_ceil(INNER).div_ceil(nt);

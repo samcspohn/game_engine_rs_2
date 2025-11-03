@@ -9,22 +9,11 @@ use crate::{
     asset_manager::{Asset, DeferredAssetQueue},
     component::Scene,
     engine::Engine,
-    obj_loader::{MESH_BUFFERS, Mesh, Model},
+    obj_loader::{MESH_BUFFERS, Mesh, Model, pack_tangent, pack_normal},
     renderer::_RendererComponent,
     texture::Texture,
     transform::{_Transform, Transform},
 };
-
-/// Converts a tangent from [f32; 4] to packed u32 with 8-bit signed normalized values
-/// Each f32 component in range [-1.0, 1.0] is converted to i8 in range [-127, 127]
-fn pack_tangent(tangent: [f32; 4]) -> u32 {
-    let x = (tangent[0].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
-    let y = (tangent[1].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
-    let z = (tangent[2].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
-    let w = (tangent[3].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
-
-    (w as u32) << 24 | (z as u32) << 16 | (y as u32) << 8 | (x as u32)
-}
 
 pub static mut ENGINE: Option<Arc<Engine>> = None;
 
@@ -184,7 +173,9 @@ fn recursive_access_node(
             }
             // Read normals
             if let Some(normals_iter) = reader.read_normals() {
-                _mesh.normals.extend(normals_iter);
+                for normal in normals_iter {
+                    _mesh.normals.push(pack_normal(normal));
+                }
             }
             // Read texture coordinates (UV)
             if let Some(tex_coords_iter) = reader.read_tex_coords(0) {
@@ -202,40 +193,69 @@ fn recursive_access_node(
                 tangents_f32.extend(tangents_iter);
             } else {
                 // If no tangents, calculate real values
-                tangents_f32
-                    .extend(std::iter::repeat([0.0, 0.0, 0.0, 0.0]).take(_mesh.vertices.len()));
-                for f in _mesh.indices.chunks(3) {
-                    let v0 = Vec3::from(_mesh.vertices[f[0] as usize]);
-                    let v1 = Vec3::from(_mesh.vertices[f[1] as usize]);
-                    let v2 = Vec3::from(_mesh.vertices[f[2] as usize]);
+                // tangents_f32
+                //     .extend(std::iter::repeat([0.0, 0.0, 0.0, 0.0]).take(_mesh.vertices.len()));
+                for &packed_normal in &_mesh.normals {
+					// Unpack the normal from u32
+					let x = ((packed_normal & 0xFF) as u8 as i8) as f32 / 127.0;
+					let y = (((packed_normal >> 8) & 0xFF) as u8 as i8) as f32 / 127.0;
+					let z = (((packed_normal >> 16) & 0xFF) as u8 as i8) as f32 / 127.0;
+					let normal = Vec3::new(x, y, z);
+					// Simple orthogonal vector
+					let tangent = if normal.x.abs() > normal.z.abs() {
+						Vec3::new(-normal.y, normal.x, 0.0)
+					} else {
+						Vec3::new(0.0, -normal.z, normal.y)
+					}
+					.normalize();
+					tangents_f32.push([tangent.x, tangent.y, tangent.z, 1.0]);
+				}
+                // for f in _mesh.indices.chunks(3) {
+      //               let v0 = Vec3::from(_mesh.vertices[f[0] as usize]);
+      //               let v1 = Vec3::from(_mesh.vertices[f[1] as usize]);
+      //               let v2 = Vec3::from(_mesh.vertices[f[2] as usize]);
 
-                    // UVs are Vec2, not Vec3!
-                    let uv0 = glam::Vec2::from(_mesh.tex_coords[f[0] as usize]);
-                    let uv1 = glam::Vec2::from(_mesh.tex_coords[f[1] as usize]);
-                    let uv2 = glam::Vec2::from(_mesh.tex_coords[f[2] as usize]);
+      //               let edge1 = v1 - v0;
+      //               let edge2 = v2 - v0;
+      //               let tangent = [
+      //               	edge1.x + edge2.x,
+						// edge1.y + edge2.y,
+						// edge1.z + edge2.z,
+						// 1.0,
+      //               ];
 
-                    let delta_pos1 = v1 - v0;
-                    let delta_pos2 = v2 - v0;
+     //  				let tangent = if
 
-                    let delta_uv1 = uv1 - uv0;
-                    let delta_uv2 = uv2 - uv0;
+     //                for &idx in f {
+					// 	tangents_f32[idx as usize] = tangent;
+					// }
+                    // // UVs are Vec2, not Vec3!
+                    // let uv0 = glam::Vec2::from(_mesh.tex_coords[f[0] as usize]);
+                    // let uv1 = glam::Vec2::from(_mesh.tex_coords[f[1] as usize]);
+                    // let uv2 = glam::Vec2::from(_mesh.tex_coords[f[2] as usize]);
 
-                    // Calculate the determinant of the UV matrix
-                    let det = delta_uv1.x * delta_uv2.y - delta_uv1.y * delta_uv2.x;
-                    let r = 1.0 / det.abs().max(0.0001);
+                    // let delta_pos1 = v1 - v0;
+                    // let delta_pos2 = v2 - v0;
 
-                    // Calculate tangent using the corrected formula
-                    let tangent = (delta_pos1 * delta_uv2.y - delta_pos2 * delta_uv1.y) * r;
+                    // let delta_uv1 = uv1 - uv0;
+                    // let delta_uv2 = uv2 - uv0;
 
-                    // Accumulate tangents for each vertex (for smooth tangents across shared vertices)
-                    for &idx in f {
-                        let t = &mut tangents_f32[idx as usize];
-                        t[0] = tangent.x;
-                        t[1] = tangent.y;
-                        t[2] = tangent.z;
-                        t[3] = 1.0; // Handedness (sign of determinant)
-                    }
-                }
+                    // // Calculate the determinant of the UV matrix
+                    // let det = delta_uv1.x * delta_uv2.y - delta_uv1.y * delta_uv2.x;
+                    // let r = 1.0 / det.abs().max(0.0001);
+
+                    // // Calculate tangent using the corrected formula
+                    // let tangent = (delta_pos1 * delta_uv2.y - delta_pos2 * delta_uv1.y) * r;
+
+                    // // Accumulate tangents for each vertex (for smooth tangents across shared vertices)
+                    // for &idx in f {
+                    //     let t = &mut tangents_f32[idx as usize];
+                    //     t[0] = tangent.x;
+                    //     t[1] = tangent.y;
+                    //     t[2] = tangent.z;
+                    //     t[3] = 1.0; // Handedness (sign of determinant)
+                    // }
+                // }
             }
 
             // Convert f32 tangents to packed u32 format

@@ -359,8 +359,8 @@ struct MyUV {
 #[derive(BufferContents, Vertex)]
 #[repr(C)]
 struct MyNormal {
-    #[format(R32G32B32_SFLOAT)]
-    normal: [f32; 3],
+    #[format(R8G8B8A8_SNORM)]
+    normal: u32,
 }
 #[derive(BufferContents, Vertex)]
 #[repr(C)]

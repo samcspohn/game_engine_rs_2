@@ -241,20 +241,20 @@ impl App {
             let a = asset_manager.load_asset::<Scene>(
                 "assets/bismark_low_poly2.glb",
                 Some(Box::new(move |handle, arc_asset| {
-                    // __world.lock().instantiate(&arc_asset);
+                    __world.lock().instantiate(&arc_asset);
                 })),
             );
             bismarck_handle = Some(a);
 
-            let _b52_entity_arc = b52_entity_arc.clone();
-            let a = asset_manager.load_asset::<Scene>(
-                "/home/sspohn/Documents/b52.1-4.glb",
-                Some(Box::new(move |handle, arc_asset| {
-                    // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
-                    *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
-                })),
-            );
-            b52_handle = Some(a);
+            // let _b52_entity_arc = b52_entity_arc.clone();
+            // let a = asset_manager.load_asset::<Scene>(
+            //     "/home/sspohn/Documents/b52.1-4.glb",
+            //     Some(Box::new(move |handle, arc_asset| {
+            //         // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
+            //         *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
+            //     })),
+            // );
+            // b52_handle = Some(a);
 
             let dims = (NUM_CUBES as f64).powf(1.0 / 3.0).ceil() as u32;
 

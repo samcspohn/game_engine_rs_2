@@ -18,12 +18,24 @@ use crate::{
 
 /// Converts a tangent from [f32; 4] to packed u32 with 8-bit signed normalized values
 /// Each f32 component in range [-1.0, 1.0] is converted to i8 in range [-127, 127]
-fn pack_tangent(tangent: [f32; 4]) -> u32 {
+pub fn pack_tangent(tangent: [f32; 4]) -> u32 {
     let x = (tangent[0].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
     let y = (tangent[1].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
     let z = (tangent[2].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
     let w = (tangent[3].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
-    
+
+    (w as u32) << 24 | (z as u32) << 16 | (y as u32) << 8 | (x as u32)
+}
+
+/// Converts a normal from [f32; 3] to packed u32 with 8-bit signed normalized values
+/// Each f32 component in range [-1.0, 1.0] is converted to i8 in range [-127, 127]
+/// The 4th byte (w) is set to 0
+pub fn pack_normal(normal: [f32; 3]) -> u32 {
+    let x = (normal[0].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
+    let y = (normal[1].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
+    let z = (normal[2].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
+    let w = 0u8;
+
     (w as u32) << 24 | (z as u32) << 16 | (y as u32) << 8 | (x as u32)
 }
 
@@ -36,7 +48,7 @@ pub struct Model {
 
 pub struct MeshBuffers {
     pub vertex_buffer: GpuVec<[f32; 3]>,
-    pub normal_buffer: GpuVec<[f32; 3]>,
+    pub normal_buffer: GpuVec<u32>,
     pub tangent_buffer: GpuVec<u32>,
     pub tex_coord_buffer: GpuVec<[f32; 2]>,
     pub color_buffer: GpuVec<[u8; 4]>,
@@ -74,7 +86,7 @@ impl MeshBuffers {
     pub fn add_mesh(
         &mut self,
         vertices: &[[f32; 3]],
-        normals: &[[f32; 3]],
+        normals: &[u32],
         tangents: &[u32],
         tex_coords: &[[f32; 2]],
         colors: &[[u8; 4]],
@@ -144,7 +156,7 @@ impl Debug for Material {
 #[derive(Debug, Clone)]
 pub struct Mesh {
     pub vertices: Vec<[f32; 3]>,
-    pub normals: Vec<[f32; 3]>,
+    pub normals: Vec<u32>,
     pub tangents: Vec<u32>,
     pub tex_coords: Vec<[f32; 2]>,
     pub colors: Vec<[u8; 4]>,
@@ -210,12 +222,13 @@ impl Asset for Model {
             // Process normals
             if !mesh.normals.is_empty() {
                 for i in (0..mesh.normals.len()).step_by(3) {
-                    normals.push([mesh.normals[i], mesh.normals[i + 1], mesh.normals[i + 2]]);
+                    let normal = [mesh.normals[i], mesh.normals[i + 1], mesh.normals[i + 2]];
+                    normals.push(pack_normal(normal));
                 }
             } else {
                 // If no normals provided, fill with default up vectors
                 for _ in 0..vertices.len() {
-                    normals.push([0.0, 1.0, 0.0]);
+                    normals.push(pack_normal([0.0, 1.0, 0.0]));
                 }
             }
 
@@ -246,7 +259,7 @@ impl Asset for Model {
 					tangents_f32[idx as usize] = tangent;
 				}
 			}
-            
+
             // Convert f32 tangents to packed u32 format
             for tangent in tangents_f32 {
                 tangents.push(pack_tangent(tangent));
@@ -457,7 +470,7 @@ impl Asset for Model {
 impl Model {
     pub fn default(gpu: &GPUManager) -> Self {
         let vertices = vec![[0.0, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, 0.5, 0.0]];
-        let normals = vec![[0.0, 0.0, 1.0]; 3];
+        let normals: Vec<u32> = vec![pack_normal([0.0, 0.0, 1.0]); 3];
         let tangents_f32 = vec![[1.0, 0.0, 0.0, 1.0]; 3];
         let tangents: Vec<u32> = tangents_f32.iter().map(|&t| pack_tangent(t)).collect();
         let tex_coords = vec![[0.0, 0.0], [1.0, 1.0], [0.0, 1.0]];

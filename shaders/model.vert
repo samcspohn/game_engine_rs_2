@@ -3,7 +3,7 @@
 
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec2 uv;
-layout(location = 2) in vec3 normal;
+layout(location = 2) in vec4 normal;
 layout(location = 3) in vec4 tangent;
 layout(location = 4) in vec4 color;
 layout(location = 5) in uvec2 rd;
@@ -61,11 +61,11 @@ void main() {
     v_color = color;
     v_position = (m[rd.x].model * vec4(position, 1.0)).xyz;
     cam_pos = (inverse(cam.view) * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-    v_normal = normalize(m[rd.x].normal * normal);
+    // v_normal = normalize(m[rd.x].normal * normal.xyz);
     v_tangent = tangent;
 
     if (materials[mat_id].normal_tex_index == uint(-1)) {
-        v_normal = normalize(m[rd.x].normal * normal);
+        v_normal = normalize(m[rd.x].normal * normal.xyz);
         return;
     }
     // vec3 tangent;
@@ -79,7 +79,7 @@ void main() {
     // bitangent = normalize(cross(v_normal, tangent));
     // TBN = mat3(tangent, bitangent, v_normal);
     vec3 T = normalize(vec3(m[rd.x].model * vec4(tangent.xyz, 0.0)));
-    vec3 N = normalize(vec3(m[rd.x].model * vec4(normal, 0.0)));
+    vec3 N = normalize(vec3(m[rd.x].model * vec4(normal.xyz, 0.0)));
     v_normal = N;
     T = normalize(T - dot(T, N) * N);
     vec3 B = cross(v_normal, T) * tangent.w;

@@ -99,8 +99,8 @@ void main() {
     color.rgb += light_intensity * base_color;
     vec3 cam_light_dir = normalize(cam_pos - frag_pos);
 
-    light_intensity = 1.0 / (1.0 + 0.1 * cam_distance + 0.01 * cam_distance * cam_distance) * max(dot(normal, cam_light_dir), 0.0);
-    color.rgb += light_intensity * base_color;
+    // light_intensity = 1.0 / (1.0 + 0.1 * cam_distance + 0.01 * cam_distance * cam_distance) * max(dot(normal, cam_light_dir), 0.0);
+    // color.rgb += light_intensity * base_color;
 
     // Add specular highlight after diffuse lighting
     uint mr = materials[mat_id].metallic_roughness_tex_index;
@@ -117,8 +117,8 @@ void main() {
         color.rgb += base_color * specular;
     }
 
-    // f_color = color;
-    f_color = vec4(normal, 1.0);
+    f_color = color;
+    // f_color = vec4(v_normal, 1.0);
     // f_color = v_tangent;
     // f_color = vec4(1.0, 0.0, 0.0, 1.0);
 }

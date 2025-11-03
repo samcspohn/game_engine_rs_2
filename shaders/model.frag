@@ -21,6 +21,8 @@ layout(location = 2) flat in uint mat_id;
 layout(location = 3) in vec3 v_normal;
 layout(location = 4) in vec3 frag_pos;
 layout(location = 5) in vec3 cam_pos;
+layout(location = 6) in mat3 v_tbn;
+layout(location = 9) in vec4 v_tangent;
 
 layout(location = 0) out vec4 f_color;
 // layout(binding = 1) uniform sampler2D tex_sampler;
@@ -60,22 +62,26 @@ void main() {
     uint normal_map = materials[mat_id].normal_tex_index;
     vec3 normal = v_normal;
     if (normal_map != uint(-1)) {
+        // vec3 normal_tex = texture(textures[normal_map], v_uv).rgb;
+        // vec3 mapped_normal = normalize(normal_tex * 2.0 - 1.0);
+        // // Transform the normal from tangent space to world space
+        // // v_normal is already multiplied by the model matrix's normal matrix
+        // vec3 tangent;
+        // vec3 bitangent;
+        // // Generate tangent and bitangent vectors
+        // if (abs(normal.x) > abs(normal.z)) {
+        //     tangent = normalize(cross(vec3(0.0, 1.0, 0.0), v_normal));
+        // } else {
+        //     tangent = normalize(cross(vec3(1.0, 0.0, 0.0), v_normal));
+        // }
+        // bitangent = normalize(cross(v_normal, tangent));
+        // mat3 TBN = mat3(tangent, bitangent, v_normal);
+        // vec3 world_normal = normalize(TBN * mapped_normal);
+        // normal = world_normal;
+
         vec3 normal_tex = texture(textures[normal_map], v_uv).rgb;
         vec3 mapped_normal = normalize(normal_tex * 2.0 - 1.0);
-        // Transform the normal from tangent space to world space
-        // v_normal is already multiplied by the model matrix's normal matrix
-        vec3 tangent;
-        vec3 bitangent;
-        // Generate tangent and bitangent vectors
-        if (abs(normal.x) > abs(normal.z)) {
-            tangent = normalize(cross(vec3(0.0, 1.0, 0.0), v_normal));
-        } else {
-            tangent = normalize(cross(vec3(1.0, 0.0, 0.0), v_normal));
-        }
-        bitangent = normalize(cross(v_normal, tangent));
-        mat3 TBN = mat3(tangent, bitangent, v_normal);
-        vec3 world_normal = normalize(TBN * mapped_normal);
-        normal = world_normal;
+        normal = normalize(v_tbn * mapped_normal);
     }
     uint spec = materials[mat_id].specular_tex_index;
     if (spec != uint(-1)) {
@@ -90,7 +96,11 @@ void main() {
     float light_intensity = max(dot(normal, light_dir), 0.0) + 0.3;
     float cam_distance = length(cam_pos - frag_pos);
     // light_intensity += 1.5 / (1.0 + 0.1 * cam_distance + 0.01 * cam_distance * cam_distance); // * dot(normalize(v_normal), normalize(-cam_pos));
-    color.rgb *= light_intensity;
+    color.rgb += light_intensity * base_color;
+    vec3 cam_light_dir = normalize(cam_pos - frag_pos);
+
+    light_intensity = 1.0 / (1.0 + 0.1 * cam_distance + 0.01 * cam_distance * cam_distance) * max(dot(normal, cam_light_dir), 0.0);
+    color.rgb += light_intensity * base_color;
 
     // Add specular highlight after diffuse lighting
     uint mr = materials[mat_id].metallic_roughness_tex_index;
@@ -107,6 +117,8 @@ void main() {
         color.rgb += base_color * specular;
     }
 
-    f_color = color;
+    // f_color = color;
+    f_color = vec4(normal, 1.0);
+    // f_color = v_tangent;
     // f_color = vec4(1.0, 0.0, 0.0, 1.0);
 }

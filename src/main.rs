@@ -98,7 +98,9 @@ const MAX_FRAMES_IN_FLIGHT: u32 = 4;
 // 1 << 21 = 2,097,152
 // 1 << 22 = 4,194,304
 // 1 << 23 = 8,388,608
-const NUM_CUBES: usize = (1);
+const BIT_SHIFT: u32 = 0;
+const ADD: usize = 0;
+const NUM_CUBES: usize = (1 << BIT_SHIFT) + ADD;
 struct FPS {
     frame_times: std::collections::VecDeque<f32>,
     frame_ages: std::collections::VecDeque<time::Instant>,

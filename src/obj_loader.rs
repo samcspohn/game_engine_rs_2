@@ -16,6 +16,17 @@ use crate::{
     texture::Texture,
 };
 
+/// Converts a tangent from [f32; 4] to packed u32 with 8-bit signed normalized values
+/// Each f32 component in range [-1.0, 1.0] is converted to i8 in range [-127, 127]
+fn pack_tangent(tangent: [f32; 4]) -> u32 {
+    let x = (tangent[0].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
+    let y = (tangent[1].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
+    let z = (tangent[2].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
+    let w = (tangent[3].clamp(-1.0, 1.0) * 127.0) as i8 as u8;
+    
+    (w as u32) << 24 | (z as u32) << 16 | (y as u32) << 8 | (x as u32)
+}
+
 // static OBJ_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
 #[derive(Debug, Clone)]
 pub struct Model {
@@ -26,6 +37,7 @@ pub struct Model {
 pub struct MeshBuffers {
     pub vertex_buffer: GpuVec<[f32; 3]>,
     pub normal_buffer: GpuVec<[f32; 3]>,
+    pub tangent_buffer: GpuVec<u32>,
     pub tex_coord_buffer: GpuVec<[f32; 2]>,
     pub color_buffer: GpuVec<[u8; 4]>,
     pub index_buffer: GpuVec<u32>,
@@ -36,6 +48,7 @@ impl MeshBuffers {
         Self {
             vertex_buffer: GpuVec::new(gpu, BufferUsage::VERTEX_BUFFER, true),
             normal_buffer: GpuVec::new(gpu, BufferUsage::VERTEX_BUFFER, true),
+            tangent_buffer: GpuVec::new(gpu, BufferUsage::VERTEX_BUFFER, true),
             tex_coord_buffer: GpuVec::new(gpu, BufferUsage::VERTEX_BUFFER, true),
             color_buffer: GpuVec::new(gpu, BufferUsage::VERTEX_BUFFER, true),
             index_buffer: GpuVec::new(gpu, BufferUsage::INDEX_BUFFER, true),
@@ -51,6 +64,7 @@ impl MeshBuffers {
         let mut ret = false;
         ret |= self.vertex_buffer.upload_delta(gpu, builder);
         ret |= self.normal_buffer.upload_delta(gpu, builder);
+        ret |= self.tangent_buffer.upload_delta(gpu, builder);
         ret |= self.tex_coord_buffer.upload_delta(gpu, builder);
         ret |= self.color_buffer.upload_delta(gpu, builder);
         ret |= self.index_buffer.upload_delta(gpu, builder);
@@ -61,6 +75,7 @@ impl MeshBuffers {
         &mut self,
         vertices: &[[f32; 3]],
         normals: &[[f32; 3]],
+        tangents: &[u32],
         tex_coords: &[[f32; 2]],
         colors: &[[u8; 4]],
         indices: &[u32],
@@ -79,6 +94,9 @@ impl MeshBuffers {
         for n in normals {
             self.normal_buffer.push_data(*n);
         }
+        for t in tangents {
+			self.tangent_buffer.push_data(*t);
+		}
         for t in tex_coords {
             self.tex_coord_buffer.push_data(*t);
         }
@@ -127,6 +145,7 @@ impl Debug for Material {
 pub struct Mesh {
     pub vertices: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    pub tangents: Vec<u32>,
     pub tex_coords: Vec<[f32; 2]>,
     pub colors: Vec<[u8; 4]>,
     pub indices: Vec<u32>,
@@ -171,6 +190,7 @@ impl Asset for Model {
         for model in models {
             let mut vertices = Vec::new();
             let mut normals = Vec::new();
+            let mut tangents = Vec::new();
             let mut tex_coords = Vec::new();
             let mut colors = Vec::new();
             let mut indices = Vec::new();
@@ -198,6 +218,40 @@ impl Asset for Model {
                     normals.push([0.0, 1.0, 0.0]);
                 }
             }
+
+            let mut tangents_f32 = vec![[1.0, 0.0, 0.0, 1.0]; vertices.len()];
+            for face in mesh.indices.chunks(3) {
+				let v0 = vertices[face[0] as usize];
+				let v1 = vertices[face[1] as usize];
+				let v2 = vertices[face[2] as usize];
+
+				let edge1 = [
+					v1[0] - v0[0],
+					v1[1] - v0[1],
+					v1[2] - v0[2],
+				];
+				let edge2 = [
+					v2[0] - v0[0],
+					v2[1] - v0[1],
+					v2[2] - v0[2],
+				];
+
+				let tangent = [
+					edge1[0] + edge2[0],
+					edge1[1] + edge2[1],
+					edge1[2] + edge2[2],
+					1.0,
+				];
+				for &idx in face {
+					tangents_f32[idx as usize] = tangent;
+				}
+			}
+            
+            // Convert f32 tangents to packed u32 format
+            for tangent in tangents_f32 {
+                tangents.push(pack_tangent(tangent));
+            }
+
 
             // Process texture coordinates
             if !mesh.texcoords.is_empty() {
@@ -234,7 +288,7 @@ impl Asset for Model {
             }
             let (vertex_offset, index_offset) = if let Some(buffers) = MESH_BUFFERS.lock().as_mut()
             {
-                buffers.add_mesh(&vertices, &normals, &tex_coords, &colors, &indices)
+                buffers.add_mesh(&vertices, &normals, &tangents, &tex_coords, &colors, &indices)
             } else {
                 panic!("MESH_BUFFERS not initialized");
             };
@@ -354,6 +408,7 @@ impl Asset for Model {
             let mesh = Mesh {
                 vertices,
                 normals,
+                tangents,
                 tex_coords,
                 colors,
                 indices,
@@ -403,6 +458,8 @@ impl Model {
     pub fn default(gpu: &GPUManager) -> Self {
         let vertices = vec![[0.0, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, 0.5, 0.0]];
         let normals = vec![[0.0, 0.0, 1.0]; 3];
+        let tangents_f32 = vec![[1.0, 0.0, 0.0, 1.0]; 3];
+        let tangents: Vec<u32> = tangents_f32.iter().map(|&t| pack_tangent(t)).collect();
         let tex_coords = vec![[0.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         let colors = vec![[255, 255, 255, 255]; 3];
         let indices = vec![0, 1, 2];
@@ -416,13 +473,14 @@ impl Model {
         // let index_buffer = gpu.buffer_from_iter(indices.iter().cloned(), BufferUsage::INDEX_BUFFER);
 
         let (vertex_offset, index_offset) = if let Some(buffers) = MESH_BUFFERS.lock().as_mut() {
-            buffers.add_mesh(&vertices, &normals, &tex_coords, &colors, &indices)
+            buffers.add_mesh(&vertices, &normals, &tangents, &tex_coords, &colors, &indices)
         } else {
             panic!("MESH_BUFFERS not initialized");
         };
         let mesh = Mesh {
             vertices,
             normals,
+            tangents,
             tex_coords,
             colors,
             indices,
@@ -444,6 +502,7 @@ impl Mesh {
         Self {
             vertices: Vec::new(),
             normals: Vec::new(),
+            tangents: Vec::new(),
             tex_coords: Vec::new(),
             colors: Vec::new(),
             indices: Vec::new(),

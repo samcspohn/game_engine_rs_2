@@ -147,6 +147,7 @@ impl RenderContext {
                 MyVertex::per_vertex(),
                 MyUV::per_vertex(),
                 MyNormal::per_vertex(),
+                MyTangent::per_vertex(),
                 MyColor::per_vertex(),
                 TransformID::per_instance(),
             ]
@@ -360,6 +361,12 @@ struct MyUV {
 struct MyNormal {
     #[format(R32G32B32_SFLOAT)]
     normal: [f32; 3],
+}
+#[derive(BufferContents, Vertex)]
+#[repr(C)]
+struct MyTangent {
+    #[format(R8G8B8A8_SNORM)]
+    tangent: u32,
 }
 #[derive(BufferContents, Vertex)]
 #[repr(C)]

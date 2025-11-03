@@ -660,6 +660,7 @@ impl RenderingSystem {
                     mesh_buffers.vertex_buffer.buf(),
                     mesh_buffers.tex_coord_buffer.buf(),
                     mesh_buffers.normal_buffer.buf(),
+                    mesh_buffers.tangent_buffer.buf(),
                     mesh_buffers.color_buffer.buf(),
                     self.transform_ids_buffer.buf(),
                 ),

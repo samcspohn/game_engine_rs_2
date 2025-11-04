@@ -281,6 +281,7 @@ impl RenderContext {
                 ..self.swapchain.create_info()
             })
             .expect("failed to recreate swapchain");
+        println!("New swapchain image count: {}", new_images.len());
         self.swapchain = new_swapchain;
         (self.attachment_image_views, self.attachment_images) =
             window_size_dependent_setup(&new_images);

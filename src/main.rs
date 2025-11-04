@@ -61,6 +61,7 @@ use crate::{
     component::{Component, ComponentStorage, Scene},
     engine::Engine,
     obj_loader::{MESH_BUFFERS, MeshBuffers},
+    render_thread::RenderThreadMessage,
     renderer::{_RendererComponent, RendererComponent, RenderingSystem},
     transform::{_Transform, Transform, compute::PerfCounter},
     util::container::Container,
@@ -177,7 +178,7 @@ struct App {
     sim_frame_end: Receiver<()>,
     bismarck_handle: Option<asset_manager::AssetHandle<Scene>>,
     b52_handle: Option<asset_manager::AssetHandle<Scene>>,
-    render_thread_snd: SyncSender<render_thread::RenderData>,
+    render_thread_snd: SyncSender<render_thread::RenderThreadMessage>,
     // render_data: Option<render_thread::RenderData>,
     commands: Vec<Arc<PrimaryAutoCommandBuffer>>,
     b52_entity: Arc<Mutex<Option<u32>>>,
@@ -241,20 +242,20 @@ impl App {
             let a = asset_manager.load_asset::<Scene>(
                 "assets/bismark_low_poly2.glb",
                 Some(Box::new(move |handle, arc_asset| {
-                    __world.lock().instantiate(&arc_asset);
+                    // __world.lock().instantiate(&arc_asset);
                 })),
             );
             bismarck_handle = Some(a);
 
-            // let _b52_entity_arc = b52_entity_arc.clone();
-            // let a = asset_manager.load_asset::<Scene>(
-            //     "/home/sspohn/Documents/b52.1-4.glb",
-            //     Some(Box::new(move |handle, arc_asset| {
-            //         // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
-            //         *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
-            //     })),
-            // );
-            // b52_handle = Some(a);
+            let _b52_entity_arc = b52_entity_arc.clone();
+            let a = asset_manager.load_asset::<Scene>(
+                "/home/sspohn/Documents/b52.1-4.glb",
+                Some(Box::new(move |handle, arc_asset| {
+                    // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
+                    *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
+                })),
+            );
+            b52_handle = Some(a);
 
             let dims = (NUM_CUBES as f64).powf(1.0 / 3.0).ceil() as u32;
 
@@ -340,7 +341,7 @@ impl App {
         });
 
         let (renderdata_snd, renderdata_rcv) = std::sync::mpsc::sync_channel::<
-            render_thread::RenderData,
+            render_thread::RenderThreadMessage,
         >(MAX_FRAMES_IN_FLIGHT as usize);
         // let renderdata_rcv = Arc::new(Mutex::new(renderdata_rcv));
         let _gpu = gpu.clone();
@@ -531,7 +532,15 @@ impl ApplicationHandler for App {
 
                 rcx.swap_chain_perf.start();
                 if rcx.recreate_swapchain {
-                    print!("Recreating swapchain... ");
+                    // print!("Recreating swapchain... ");
+                    let p = render_thread::Purge::new();
+                    let done = p.done.clone();
+                    self.render_thread_snd
+                        .send(RenderThreadMessage::Purge(p))
+                        .unwrap();
+                    while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    	std::thread::yield_now();
+					}
                     rcx.recreate_swapchain();
                 }
                 rcx.acquire_next_image_perf.start();
@@ -544,9 +553,14 @@ impl ApplicationHandler for App {
                     Ok(r) => r,
                     Err(VulkanError::OutOfDate) => {
                         rcx.recreate_swapchain = true;
+                        println!("Swapchain out of date during acquire next image");
                         return;
                     }
-                    Err(e) => panic!("failed to acquire next image: {e}"),
+                    Err(e) => {
+                    	rcx.recreate_swapchain = true;
+                    	println!("Failed to acquire next image: {e}");
+						return;
+                    },
                 };
                 rcx.acquire_next_image_perf.stop();
                 rcx.swap_chain_perf.stop();
@@ -635,7 +649,10 @@ impl ApplicationHandler for App {
                     image_view: rcx.attachment_image_views[image_index as usize].clone(),
                     fps: self.fps.frame_times.len() as f32 / self.fps.time_sum,
                 };
-                match self.render_thread_snd.send(render_data) {
+                match self
+                    .render_thread_snd
+                    .send(RenderThreadMessage::Render(render_data))
+                {
                     Ok(_) => {}
                     Err(e) => {
                         println!("Error sending render data to render thread: {}", e);
@@ -713,20 +730,6 @@ impl ApplicationHandler for App {
             .get_mut("create command buffer")
             .unwrap()
             .stop();
-        //     {
-        //         let create_command_buffer_time =
-        //             self.extra_perfs.get_mut("create command buffer").unwrap();
-        //         if create_command_buffer_time.sum / create_command_buffer_time.times.len() as f32 > 0.0002 {
-        //             // std::thread::sleep(std::time::Duration::from_millis(10));
-        // //             println!(
-        // // 	"Create command buffer time high: {} s",
-        // // 	create_command_buffer_time.sum
-        // // 		/ create_command_buffer_time.times.len() as f32
-        // // );
-        // // *create_command_buffer_time = PerfCounter::new();
-        // // self.gpu = GPUManager::new(_event_loop);
-        //         }
-        //     }
         self.extra_perfs
             .entry("upload meshes".to_owned())
             .or_insert(PerfCounter::new())

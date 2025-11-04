@@ -231,15 +231,15 @@ impl RenderingSystem {
         if !self.model_map.contains_key(&m_id) {
             let idx = self.model_indirect_buffer.data_len() as u32;
             self.model_indirect_buffer.push_data(cs::ModelIndirect {
-                offset: 0,
-                count: 1,
+                offset: u32::MAX,
+                count: 0,
             }); // render placeholder mesh
             self.model_map.insert(m_id, idx);
             self.model_counts.insert(
                 idx,
                 ModelCount {
                     count: 0,
-                    num_mesh: 1,
+                    num_mesh: 0,
                 },
             );
             self.indirect_model_map.insert(idx, m_id);
@@ -265,10 +265,10 @@ impl RenderingSystem {
         self.model_asset_map.insert(ind_idx, asset.clone());
 
         let mesh_count = asset.meshes.len() as u32;
-        self.model_counts.get(&ind_idx).map(|mc| {
-            self.mvp_count
-                .fetch_sub(mc.count * mc.num_mesh, Ordering::SeqCst);
-        });
+        // self.model_counts.get(&ind_idx).map(|mc| {
+        //     self.mvp_count
+        //         .fetch_sub(mc.count * mc.num_mesh, Ordering::SeqCst);
+        // });
         self.model_counts.get_mut(&ind_idx).map(|mc| {
             mc.num_mesh = mesh_count;
             self.mvp_count

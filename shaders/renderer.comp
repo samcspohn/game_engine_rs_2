@@ -129,6 +129,9 @@ void main() {
                 break;
             }
             ModelIndirect mc = model_indirect[r.m_id];
+            if (mc.offset == uint(-1)) {
+                break;
+            }
             for (uint i = 0; i < mc.count; ++i) {
                 // atomicAdd(indirect[mc.offset + i].instanceCount, 1); // no culling yet
                 atomicAdd(indirect[mc.offset + i].firstInstance, 1);
@@ -178,10 +181,13 @@ void main() {
                     if (r.m_id == uint(-1) || r.t_idx == uint(-1)) {
                         break;
                     }
+                    ModelIndirect mc = model_indirect[r.m_id];
+                    if (mc.offset == uint(-1)) {
+                        break;
+                    }
                     mat4 model_matrix = m[r.t_idx].model;
                     m[r.t_idx].mvp = cam.proj * cam.view * model_matrix;
                     // mat3 normal = inverse(transpose(mat3(model_matrix)));
-                    ModelIndirect mc = model_indirect[r.m_id];
                     for (uint i = 0; i < mc.count; ++i) {
                         uint mvp_idx = indirect[mc.offset + i].firstInstance +
                                 atomicAdd(indirect[mc.offset + i].instanceCount, 1);

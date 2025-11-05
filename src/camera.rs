@@ -131,12 +131,12 @@ impl Camera {
         self.depth_view = ImageView::new_default(depth_image).unwrap();
     }
     pub fn get_view_matrix(&self) -> glam::Mat4 {
-        let translate = glam::Mat4::from_translation(-self.pos);
-        let rotate = glam::Mat4::from_quat(self.rot.conjugate());
-        rotate * translate
+
+        let forward = self.rot * Vec3::Z;
+		glam::Mat4::look_at_lh(self.pos, self.pos + forward, self.rot * Vec3::Y)
     }
     pub fn get_proj_matrix(&self, aspect: f32) -> glam::Mat4 {
-        glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, aspect, self.near, self.far)
+        glam::Mat4::perspective_lh(std::f32::consts::FRAC_PI_2, aspect, self.near, self.far)
     }
     pub fn update_uniform(
         &self,
@@ -172,19 +172,19 @@ impl Camera {
         let mut movement = Vec3::ZERO;
         if input.get_key(KeyCode::KeyW) {
             // FORWARD
-            movement += Vec3::new(0.0, 0.0, -move_amount);
+            movement += Vec3::new(0.0, 0.0, move_amount);
         }
         if input.get_key(KeyCode::KeyS) {
             // BACKWARD
-            movement += Vec3::new(0.0, 0.0, move_amount);
-        }
-        if input.get_key(KeyCode::KeyA) {
-            // LEFT
-            movement += Vec3::new(-move_amount, 0.0, 0.0);
+            movement += Vec3::new(0.0, 0.0, -move_amount);
         }
         if input.get_key(KeyCode::KeyD) {
             // RIGHT
             movement += Vec3::new(move_amount, 0.0, 0.0);
+        }
+        if input.get_key(KeyCode::KeyA) {
+            // LEFT
+            movement += Vec3::new(-move_amount, 0.0, 0.0);
         }
         if input.get_key(KeyCode::Space) {
             // UP
@@ -197,8 +197,8 @@ impl Camera {
         self.translate(movement.normalize_or_zero() * move_amount);
         let mouse_sensitivity = 0.002;
         let (dx, dy) = input.mouse.delta();
-        self.rotate(Vec3::Y, -(dx as f32) * mouse_sensitivity);
-        self.rotate(self.rot * Vec3::X, -(dy as f32) * mouse_sensitivity);
+        self.rotate(Vec3::Y, (dx as f32) * mouse_sensitivity);
+        self.rotate(self.rot * Vec3::X, (dy as f32) * mouse_sensitivity);
 
         if input.get_key_pressed(KeyCode::Escape) {
             *grab_cursor = !*grab_cursor;

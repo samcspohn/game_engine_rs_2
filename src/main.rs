@@ -247,15 +247,15 @@ impl App {
             );
             bismarck_handle = Some(a);
 
-            let _b52_entity_arc = b52_entity_arc.clone();
-            let a = asset_manager.load_asset::<Scene>(
-                "/home/sspohn/Documents/b52.1-4.glb",
-                Some(Box::new(move |handle, arc_asset| {
-                    // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
-                    *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
-                })),
-            );
-            b52_handle = Some(a);
+            // let _b52_entity_arc = b52_entity_arc.clone();
+            // let a = asset_manager.load_asset::<Scene>(
+            //     "/home/sspohn/Documents/b52.1-4.glb",
+            //     Some(Box::new(move |handle, arc_asset| {
+            //         // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
+            //         *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
+            //     })),
+            // );
+            // b52_handle = Some(a);
 
             let dims = (NUM_CUBES as f64).powf(1.0 / 3.0).ceil() as u32;
 
@@ -299,6 +299,19 @@ impl App {
             }
             // drop(_rendering_system);
             // drop(_component_registry);
+
+            for i in 0..3 {
+                let mut dir = Vec3::ZERO;
+                dir[i] = 1.0;
+                for i in 0..5 {
+                    let t = _Transform {
+                        position: dir * 5.0 * (i as f32 + 1.0),
+                        .._Transform::default()
+                    };
+                    let e = world.new_entity(t);
+                    world.add_component(e, RendererComponent::new(cube.clone()));
+                }
+            }
         }
 
         // let transform_hierarchy = Arc::new(Mutex::new(transform_hierarchy));
@@ -539,8 +552,8 @@ impl ApplicationHandler for App {
                         .send(RenderThreadMessage::Purge(p))
                         .unwrap();
                     while !done.load(std::sync::atomic::Ordering::SeqCst) {
-                    	std::thread::yield_now();
-					}
+                        std::thread::yield_now();
+                    }
                     rcx.recreate_swapchain();
                 }
                 rcx.acquire_next_image_perf.start();
@@ -557,10 +570,10 @@ impl ApplicationHandler for App {
                         return;
                     }
                     Err(e) => {
-                    	rcx.recreate_swapchain = true;
-                    	println!("Failed to acquire next image: {e}");
-						return;
-                    },
+                        rcx.recreate_swapchain = true;
+                        println!("Failed to acquire next image: {e}");
+                        return;
+                    }
                 };
                 rcx.acquire_next_image_perf.stop();
                 rcx.swap_chain_perf.stop();

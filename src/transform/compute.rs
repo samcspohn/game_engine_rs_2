@@ -446,75 +446,109 @@ impl TransformCompute {
             let scale = &scale_cell;
             let _flags = &flags_cell;
 
-            // const OUTER: usize = 32;
-            const INNER: usize = 32; // 32 transforms per flag u32
-            let nt = rayon::current_num_threads().min(len.div_ceil(1024)).max(1);
-            let outer = len.div_ceil(INNER).div_ceil(nt);
-            (0..nt).into_par_iter().for_each(|chunk_id| {
-                // let parent_updates = parent_updates.clone();
-                let thread_index = rayon::current_thread_index().unwrap_or(0);
-                let _parent_updates = &mut parent_updates[thread_index].lock();
-                // outer * inner
-                let poss = unsafe { &mut *pos.get() };
-                let rots = unsafe { &mut *rot.get() };
-                let scales = unsafe { &mut *scale.get() };
-                let flags = unsafe { &mut *(_flags.get()) };
-                // let dirty_l2 = unsafe { &mut *dirty_l2.get() };
-                let hierarchy = unsafe { &*_hierarchy.get() };
-                let start = chunk_id * outer;
-                let end = ((chunk_id + 1) * outer).min(len.div_ceil(INNER));
-                // let start = (chunk_id as f32 * outer).floor() as usize;
-                // let end = (((chunk_id + 1) as f32 * outer) as usize).min(len.div_ceil(INNER));
-                // let l2_data = hierarchy.get_dirty_l2(chunk_id);
-                // dirty_l2[chunk_id] = l2_data;
-                // if l2_data == 0 {
-                //     // no changes in this chunk
-                //     return;
-                // }
-                // dirty_l2[chunk_id] = !0;
-                (start..end).for_each(|i| {
-                    // 32 loops
-                    let inner_start = i * INNER;
-                    let inner_end = (inner_start + INNER).min(len);
-                    let mut pos_flag = 0u32;
-                    let mut rot_flag = 0u32;
-                    let mut scl_flag = 0u32;
-                    let mut bit = 0b1u32;
-                    (inner_start..inner_end).for_each(|idx| {
-                        // 32 loops
-                        let dirty = hierarchy.get_dirty(idx as u32);
-                        // if dirty & (1 << 4) != 0 {
-                        // let _idx = idx * 10; // 3 pos, 4 rot, 3 scale
-                        if dirty & (1 << 0) != 0 {
-                            let p = unsafe { &*hierarchy.positions[idx].get() };
-                            // values[_idx.._idx + 3].copy_from_slice(&p.to_array());
-                            poss[idx * 3..idx * 3 + 3].copy_from_slice(&p.to_array());
-                            pos_flag |= bit;
+            let dirty = &hierarchy.dirty;
+            let dirty_par_iter = dirty
+                .position
+                .par_iter()
+                .zip_eq(dirty.rotation.par_iter())
+                .zip_eq(dirty.scale.par_iter())
+                .zip_eq(dirty.parent.par_iter());
+
+            dirty_par_iter
+                .enumerate()
+                .chunks(32)
+                .for_each(|dirty_chunks| {
+                    let thread_index = rayon::current_thread_index().unwrap_or(0);
+                    let mut _parent_updates = &mut parent_updates[thread_index].lock();
+                    let poss = unsafe { &mut *pos.get() };
+                    let rots = unsafe { &mut *rot.get() };
+                    let scales = unsafe { &mut *scale.get() };
+                    let flags = unsafe { &mut *(_flags.get()) };
+
+                    for dirty in dirty_chunks {
+                        let (idx, (((pos_bits, rot_bits), scl_bits), parent_bits)) = dirty;
+                        // let idx = *idx as usize;
+
+                        let pos_bits = unsafe { &mut *pos_bits.as_ptr() };
+                        let rot_bits = unsafe { &mut *rot_bits.as_ptr() };
+                        let scl_bits = unsafe { &mut *scl_bits.as_ptr() };
+                        let parent_bits = unsafe { &mut *parent_bits.as_ptr() };
+
+                        let mut pos_flag: u32 = 0;
+                        let mut rot_flag: u32 = 0;
+                        let mut scl_flag: u32 = 0;
+
+                        let base_idx = idx << 5;
+
+                        if *pos_bits > 0 {
+                            for bit in 0..32 {
+                                if (*pos_bits & (1 << bit)) != 0 {
+                                    let current_idx = base_idx + bit as usize;
+                                    if current_idx >= len {
+                                        break;
+                                    }
+                                    let p = unsafe { &*hierarchy.positions[current_idx].get() };
+                                    poss[current_idx * 3..current_idx * 3 + 3]
+                                        .copy_from_slice(&p.to_array());
+                                    pos_flag |= 1 << bit;
+                                }
+                            }
+                            *pos_bits = 0;
                         }
-                        if dirty & (1 << 1) != 0 {
-                            let r = unsafe { &*hierarchy.rotations[idx].get() };
-                            rots[idx * 4..idx * 4 + 4].copy_from_slice(&r.to_array());
-                            rot_flag |= bit;
+
+                        if *rot_bits > 0 {
+                            for bit in 0..32 {
+                                if (*rot_bits & (1 << bit)) != 0 {
+                                    let current_idx = base_idx + bit as usize;
+                                    if current_idx >= len {
+                                        break;
+                                    }
+                                    let r = unsafe { &*hierarchy.rotations[current_idx].get() };
+                                    rots[current_idx * 4..current_idx * 4 + 4]
+                                        .copy_from_slice(&r.to_array());
+                                    rot_flag |= 1 << bit;
+                                }
+                            }
+                            *rot_bits = 0;
                         }
-                        if dirty & (1 << 2) != 0 {
-                            let s = unsafe { &*hierarchy.scales[idx].get() };
-                            scales[idx * 3..idx * 3 + 3].copy_from_slice(&s.to_array());
-                            scl_flag |= bit;
+
+                        if *scl_bits > 0 {
+                            for bit in 0..32 {
+                                if (*scl_bits & (1 << bit)) != 0 {
+                                    let current_idx = base_idx + bit as usize;
+                                    if current_idx >= len {
+                                        break;
+                                    }
+                                    let s = unsafe { &*hierarchy.scales[current_idx].get() };
+                                    scales[current_idx * 3..current_idx * 3 + 3]
+                                        .copy_from_slice(&s.to_array());
+                                    scl_flag |= 1 << bit;
+                                }
+                            }
+                            *scl_bits = 0;
                         }
-                        if dirty & (1 << 3) != 0 {
-                            let p = unsafe { &*hierarchy.metadata[idx].get() }.parent;
-                            _parent_updates.push((idx as u32, p));
+
+                        if *parent_bits > 0 {
+                            for bit in 0..32 {
+                                if (*parent_bits & (1 << bit)) != 0 {
+                                    let current_idx = base_idx + bit as usize;
+                                    if current_idx >= len {
+                                        break;
+                                    }
+                                    let p =
+                                        unsafe { &*hierarchy.metadata[current_idx].get() }.parent;
+                                    _parent_updates.push((current_idx as u32, p));
+                                }
+                            }
+                            *parent_bits = 0;
                         }
-                        // }
-                        hierarchy.mark_clean(idx as u32);
-                        bit <<= 1;
-                    });
-                    flags[i * 3 + 0] = pos_flag;
-                    flags[i * 3 + 1] = rot_flag;
-                    flags[i * 3 + 2] = scl_flag;
+
+                        flags[idx * 3 + 0] = pos_flag;
+                        flags[idx * 3 + 1] = rot_flag;
+                        flags[idx * 3 + 2] = scl_flag;
+                    }
                 });
-            });
-            // }
+
 
             self.perf_counters.update_bufs.stop();
             self.perf_counters.update_parents.start();

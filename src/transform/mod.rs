@@ -171,13 +171,76 @@ impl _Transform {
     }
 }
 
+pub struct Dirty {
+	position: Vec<AtomicU32>,
+	rotation: Vec<AtomicU32>,
+	scale: Vec<AtomicU32>,
+	parent: Vec<AtomicU32>,
+}
+
+impl Dirty {
+	pub fn new() -> Self {
+		Self {
+			position: Vec::new(),
+			rotation: Vec::new(),
+			scale: Vec::new(),
+			parent: Vec::new(),
+		}
+	}
+	#[inline]
+	pub fn pos(&self, idx: u32) {
+		let mask = 1 << (idx & 31);
+		self.position[idx as usize >> 5].fetch_or(mask, Ordering::Relaxed);
+	}
+	#[inline]
+	pub fn rot(&self, idx: u32) {
+		let mask = 1 << (idx & 31);
+		self.rotation[idx as usize >> 5].fetch_or(mask, Ordering::Relaxed);
+	}
+	#[inline]
+	pub fn pos_rot(&self, idx: u32) {
+		let mask = 1 << (idx & 31);
+		let i = idx as usize >> 5;
+		self.position[i].fetch_or(mask, Ordering::Relaxed);
+		self.rotation[i].fetch_or(mask, Ordering::Relaxed);
+	}
+	#[inline]
+	pub fn scale(&self, idx: u32) {
+		let mask = 1 << (idx & 31);
+		self.scale[idx as usize >> 5].fetch_or(mask, Ordering::Relaxed);
+	}
+	#[inline]
+	pub fn parent(&self, idx: u32) {
+		let mask = 1 << (idx & 31);
+		self.parent[idx as usize >> 5].fetch_or(mask, Ordering::Relaxed);
+	}
+	#[inline]
+	pub fn all(&self, idx: u32) {
+		let mask = 1 << (idx & 31);
+		self.position[idx as usize >> 5].fetch_or(mask, Ordering::Relaxed);
+		self.rotation[idx as usize >> 5].fetch_or(mask, Ordering::Relaxed);
+		self.scale[idx as usize >> 5].fetch_or(mask, Ordering::Relaxed);
+		self.parent[idx as usize >> 5].fetch_or(mask, Ordering::Relaxed);
+	}
+	pub fn push(&mut self) {
+		self.position.push(AtomicU32::new(0));
+		self.rotation.push(AtomicU32::new(0));
+		self.scale.push(AtomicU32::new(0));
+		self.parent.push(AtomicU32::new(0));
+	}
+	pub fn len(&self) -> usize {
+		self.position.len()
+	}
+}
+
 pub struct TransformHierarchy {
     mutexes: Vec<Mutex<()>>,
     positions: Vec<SyncUnsafeCell<Vec3>>,
     rotations: Vec<SyncUnsafeCell<Quat>>,
     scales: Vec<SyncUnsafeCell<Vec3>>,
     metadata: Vec<SyncUnsafeCell<TransformMeta>>,
-    dirty: Vec<AtomicU8>,
+    // dirty: Vec<AtomicU8>,
+    dirty: Dirty,
     dirty_l2: Vec<AtomicU32>, // one bit for every 32 transforms 1024 total per u32
     has_children: Vec<AtomicU32>,
     active: Vec<AtomicU32>,
@@ -193,7 +256,7 @@ impl TransformHierarchy {
             rotations: Vec::new(),
             scales: Vec::new(),
             metadata: Vec::new(),
-            dirty: Vec::new(),
+            dirty: Dirty::new(),
             dirty_l2: Vec::new(),
             has_children: Vec::new(),
             active: Vec::new(),
@@ -222,22 +285,29 @@ impl TransformHierarchy {
                 .push(idx as u32);
             self.has_children[parent as usize >> 5].fetch_or(1 << (parent & 31), Ordering::Relaxed);
         }
-        if idx >> 1 >= self.dirty.len() {
-            self.dirty.push(AtomicU8::new(0b1111)); // one u8 for every 2 transforms
-        } else {
-            self.dirty[idx >> 1].fetch_or(0b1111 << 4, Ordering::Relaxed);
-        }
+        // if idx >> 1 >= self.dirty.len() {
+        //     self.dirty.push(AtomicU8::new(0b1111)); // one u8 for every 2 transforms
+        // } else {
+        //     self.dirty[idx >> 1].fetch_or(0b1111 << 4, Ordering::Relaxed);
+        // }
         // if idx >> 10 >= self.dirty_l2.len() {
         //     self.dirty_l2.push(AtomicU32::new(0));
         // }
         // self.dirty_l2[idx >> 10].fetch_or(1 << ((idx >> 5) & 0b11111), Ordering::Relaxed);
-        if idx >> 5 >= self.has_children.len() {
+        if idx >> 5 >= self.dirty.len() {
             self.has_children.push(AtomicU32::new(0));
-        }
-        if idx >> 5 >= self.active.len() {
+            self.dirty.push();
             self.active.push(AtomicU32::new(0));
         }
         self.active[idx >> 5].fetch_or(1 << (idx & 31), Ordering::Relaxed);
+  //       self.mark_dirty(
+		// 	&self._lock_internal(idx as u32),
+		// 	TransformComponent::Parent
+		// 		| TransformComponent::Position
+		// 		| TransformComponent::Rotation
+		// 		| TransformComponent::Scale,
+		// );
+		self.dirty.all(idx as u32);
         // self.dirty.push(AtomicU8::new(0b1111));
 
         Transform::new(self, idx as u32)
@@ -247,18 +317,20 @@ impl TransformHierarchy {
         if self.get_active(t.idx as u32) {
             self.active[t.idx >> 5].fetch_and(!(1 << (t.idx & 0b11111)), Ordering::Relaxed);
             self.has_children[t.idx >> 5].fetch_and(!(1 << (t.idx & 0b11111)), Ordering::Relaxed);
-            self.mark_dirty(
-                &t,
-                TransformComponent::Parent
-                    | TransformComponent::Position
-                    | TransformComponent::Rotation
-                    | TransformComponent::Scale,
-            );
+            // self.mark_dirty(
+            //     &t,
+            //     TransformComponent::Parent
+            //         | TransformComponent::Position
+            //         | TransformComponent::Rotation
+            //         | TransformComponent::Scale,
+            // );
+            self.dirty.all(t.idx as u32);
             let children = self.get_children(&t);
             for child in children {
                 let child = self._lock_internal(*child);
                 self.get_meta(&child).parent = u32::MAX;
-                self.mark_dirty(&child, TransformComponent::Parent);
+                // self.mark_dirty(&child, TransformComponent::Parent);
+                self.dirty.parent(child.idx as u32);
             }
             if let Some(parent) = self.get_parent(&t) {
                 drop(t);
@@ -286,39 +358,39 @@ impl TransformHierarchy {
         let mask = 1 << (idx & 0b11111);
         (self.has_children[idx as usize >> 5].load(Ordering::Relaxed) & mask) != 0
     }
-    #[inline]
-    fn mark_dirty(&self, t: &TransformGuard, component: impl Into<TransformComponentFlags>) {
-        let flags: TransformComponentFlags = component.into();
-        let shift = (t.idx & 1) * 4;
-        let flag = flags.0 << shift;
-        unsafe {
-            self.dirty
-                .get_unchecked(t.idx >> 1)
-                .fetch_or(flag, Ordering::Relaxed)
-        };
-    }
+    // #[inline]
+    // fn mark_dirty(&self, t: &TransformGuard, component: impl Into<TransformComponentFlags>) {
+    //     let flags: TransformComponentFlags = component.into();
+    //     let shift = (t.idx & 1) * 4;
+    //     let flag = flags.0 << shift;
+    //     unsafe {
+    //         self.dirty
+    //             .get_unchecked(t.idx >> 1)
+    //             .fetch_or(flag, Ordering::Relaxed)
+    //     };
+    // }
 
-    fn get_dirty(&self, idx: u32) -> u8 {
-        let shift = (idx & 1) * 4; // Fixed: Added parentheses
-        let mask = 0b1111 << shift;
-        // Fixed: Use load to read without modifying; shift back to return only the 4 bits
-        ((unsafe { self.dirty.get_unchecked((idx >> 1) as usize) }).load(Ordering::Relaxed) & mask)
-            >> shift
-    }
+    // fn get_dirty(&self, idx: u32) -> u8 {
+    //     let shift = (idx & 1) * 4; // Fixed: Added parentheses
+    //     let mask = 0b1111 << shift;
+    //     // Fixed: Use load to read without modifying; shift back to return only the 4 bits
+    //     ((unsafe { self.dirty.get_unchecked((idx >> 1) as usize) }).load(Ordering::Relaxed) & mask)
+    //         >> shift
+    // }
 
     fn get_dirty_l2(&self, chunk_id: usize) -> u32 {
         self.dirty_l2[chunk_id].swap(0, Ordering::Relaxed)
     }
 
-    fn mark_clean(&self, idx: u32) {
-        let shift = (idx & 1) * 4; // Fixed: Added parentheses
-        let mask = !(0b1111 << shift); // Fixed: Use NOT of the mask to clear the bits
-        unsafe {
-            self.dirty
-                .get_unchecked((idx >> 1) as usize)
-                .fetch_and(mask, Ordering::Relaxed)
-        };
-    }
+    // fn mark_clean(&self, idx: u32) {
+    //     let shift = (idx & 1) * 4; // Fixed: Added parentheses
+    //     let mask = !(0b1111 << shift); // Fixed: Use NOT of the mask to clear the bits
+    //     unsafe {
+    //         self.dirty
+    //             .get_unchecked((idx >> 1) as usize)
+    //             .fetch_and(mask, Ordering::Relaxed)
+    //     };
+    // }
 
     pub fn set_parent(&self, t: &TransformGuard, parent: Option<u32>) {
         let old_parent = self.get_parent(t);
@@ -343,7 +415,8 @@ impl TransformHierarchy {
         } else {
             self.get_meta(t).parent = u32::MAX;
         }
-        self.mark_dirty(t, TransformComponent::Parent);
+        // self.mark_dirty(t, TransformComponent::Parent);
+        self.dirty.parent(t.idx as u32);
     }
     fn _lock_internal<'a>(&'a self, idx: u32) -> TransformGuard<'a> {
         let lock = self.mutexes[idx as usize].lock();
@@ -368,7 +441,8 @@ impl TransformHierarchy {
     fn scale_by(&self, t: &TransformGuard, scale: Vec3) {
         let s = self._scale(t.idx as u32);
         *s *= scale;
-        self.mark_dirty(t, TransformComponent::Scale);
+        self.dirty.scale(t.idx as u32);
+        // self.mark_dirty(t, TransformComponent::Scale);
     }
     fn set_scale(&self, t: &TransformGuard, scale: Vec3) {
         let s = self._scale(t.idx as u32);
@@ -377,7 +451,8 @@ impl TransformHierarchy {
         //     let base_pos = self._position(t.idx as u32);
         //     self.scale_children(t, scale, base_pos);
         // }
-        self.mark_dirty(t, TransformComponent::Scale);
+        self.dirty.scale(t.idx as u32);
+        // self.mark_dirty(t, TransformComponent::Scale);
     }
     pub(crate) fn scale_children(&self, t: &TransformGuard, scale: Vec3, base_pos: &Vec3) {
         let children = self.get_children(t);
@@ -387,7 +462,8 @@ impl TransformHierarchy {
             let p = self._position(child.idx as u32);
             *s *= scale;
             *p = base_pos + (*p - base_pos) * scale;
-            self.mark_dirty(&child, TransformComponent::Scale);
+            self.dirty.scale(child.idx as u32);
+            // self.mark_dirty(&child, TransformComponent::Scale);
             // if self.get_has_children(child.idx as u32) {
             //     self.scale_children(&child, scale, base_pos);
             // }
@@ -396,7 +472,8 @@ impl TransformHierarchy {
     fn shift(&self, t: &TransformGuard, delta: Vec3) {
         let p = self._position(t.idx as u32);
         *p += delta;
-        self.mark_dirty(t, TransformComponent::Position);
+        self.dirty.pos(t.idx as u32);
+        // self.mark_dirty(t, TransformComponent::Position);
         // if self.get_has_children(t.idx as u32) {
         //     self.translate_children(t, delta);
         // }
@@ -406,7 +483,8 @@ impl TransformHierarchy {
         let r = self._rotation(t.idx as u32);
         let translation = *r * translation;
         *p += translation;
-        self.mark_dirty(t, TransformComponent::Position);
+        self.dirty.pos(t.idx as u32);
+        // self.mark_dirty(t, TransformComponent::Position);
         // if self.get_has_children(t.idx as u32) {
         //     self.translate_children(t, translation);
         // }
@@ -417,7 +495,8 @@ impl TransformHierarchy {
             let child = self._lock_internal(*child);
             let p = self._position(child.idx as u32);
             *p += translation;
-            self.mark_dirty(&child, TransformComponent::Position);
+            self.dirty.pos(child.idx as u32);
+            // self.mark_dirty(&child, TransformComponent::Position);
             // if self.get_has_children(child.idx as u32) {
             //     self.translate_children(&child, translation);
             // }
@@ -430,12 +509,14 @@ impl TransformHierarchy {
         //     self.translate_children(t, delta);
         // }
         *p = position;
-        self.mark_dirty(t, TransformComponent::Position);
+        self.dirty.pos(t.idx as u32);
+        // self.mark_dirty(t, TransformComponent::Position);
     }
     fn rotate_by(&self, t: &TransformGuard, rotation: Quat) {
         let r = self._rotation(t.idx as u32);
         *r = rotation * *r;
-        self.mark_dirty(t, TransformComponent::Rotation);
+        self.dirty.rot(t.idx as u32);
+        // self.mark_dirty(t, TransformComponent::Rotation);
         // if self.get_has_children(t.idx as u32) {
         //     self.rotate_children(t, rotation, *self._position(t.idx as u32));
         // }
@@ -449,10 +530,11 @@ impl TransformHierarchy {
             let p = self._position(child.idx as u32);
             *p = rotation * (*p - position) + position;
             *r = rotation * *r;
-            self.mark_dirty(
-                &child,
-                TransformComponent::Rotation | TransformComponent::Position,
-            );
+            // self.mark_dirty(
+            //     &child,
+            //     TransformComponent::Rotation | TransformComponent::Position,
+            // );
+            self.dirty.pos_rot(child.idx as u32);
             if self.get_has_children(child.idx as u32) {
                 self.rotate_children(&child, rotation, position);
             }
@@ -466,7 +548,8 @@ impl TransformHierarchy {
         //     self.rotate_children(t, delta, *self._position(t.idx as u32));
         // }
         *r = rotation;
-        self.mark_dirty(t, TransformComponent::Rotation);
+        self.dirty.rot(t.idx as u32);
+        // self.mark_dirty(t, TransformComponent::Rotation);
     }
     pub fn get_transform_unchecked(&self, idx: u32) -> Transform<'_> {
         Transform::new(self, idx)

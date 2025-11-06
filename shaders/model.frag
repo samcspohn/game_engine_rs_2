@@ -31,7 +31,7 @@ layout(set = 0, binding = 2) buffer Materials {
 };
 layout(set = 0, binding = 3) uniform sampler2D textures[];
 
-const vec3 light_dir = normalize(vec3(1.0, 1.0, 1.0));
+const vec3 light_dir = normalize(vec3(1.0, -1.0, 1.0));
 
 // function to calculate specular highlight
 float calculate_specular(vec3 light_dir, vec3 view_dir, vec3 normal, float shininess) {
@@ -94,7 +94,7 @@ void main() {
     }
 
     // Calculate diffuse lighting using the correct normal
-    float light_intensity = max(dot(normal, light_dir), 0.0) * 10.0;
+    float light_intensity = max(dot(normal, -light_dir), 0.0) * 5.0;
     float cam_distance = length(cam_pos - frag_pos);
     // light_intensity += 1.5 / (1.0 + 0.1 * cam_distance + 0.01 * cam_distance * cam_distance); // * dot(normalize(v_normal), normalize(-cam_pos));
     color.rgb += light_intensity * base_color;

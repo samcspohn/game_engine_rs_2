@@ -99,7 +99,7 @@ const MAX_FRAMES_IN_FLIGHT: u32 = 4;
 // 1 << 21 = 2,097,152
 // 1 << 22 = 4,194,304
 // 1 << 23 = 8,388,608
-const BIT_SHIFT: u32 = 0;
+const BIT_SHIFT: u32 = 20;
 const ADD: usize = 0;
 const NUM_CUBES: usize = (1 << BIT_SHIFT) + ADD;
 struct FPS {
@@ -238,14 +238,14 @@ impl App {
                 .rendering_system
                 .lock()
                 .get_or_register_model_handle(cube.clone());
-            let __world = _world.clone();
-            let a = asset_manager.load_asset::<Scene>(
-                "assets/bismark_low_poly2.glb",
-                Some(Box::new(move |handle, arc_asset| {
-                    // __world.lock().instantiate(&arc_asset);
-                })),
-            );
-            bismarck_handle = Some(a);
+            // let __world = _world.clone();
+            // let a = asset_manager.load_asset::<Scene>(
+            //     "/home/sspohn/Documents/bismark_low_poly_+zf.glb",
+            //     Some(Box::new(move |handle, arc_asset| {
+            //         __world.lock().instantiate(&arc_asset);
+            //     })),
+            // );
+            // bismarck_handle = Some(a);
 
             // let _b52_entity_arc = b52_entity_arc.clone();
             // let a = asset_manager.load_asset::<Scene>(

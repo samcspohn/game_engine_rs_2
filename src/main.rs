@@ -326,6 +326,7 @@ impl App {
             sim_frame_end_snd.send(()).unwrap();
             // let transform_hierarchy = transform_hierarchy_clone;
             // let component_registry = component_registry_clone;
+            _world.lock().perf = Some(HashMap::new());
             loop {
                 match sim_frame_start_rcv.recv() {
                     Ok(dt) => {
@@ -347,6 +348,11 @@ impl App {
                         sim_frame_end_snd.send(()).unwrap();
                     }
                     Err(_) => {
+                        _world.lock().perf.take().map(|perf| {
+                            for (name, counter) in perf.iter() {
+                                println!("Sim Perf {}: {:?} ms", name, counter);
+                            }
+                        });
                         break;
                     }
                 }
@@ -771,20 +777,6 @@ impl ApplicationHandler for App {
             .stop();
 
         self.extra_perfs
-            .entry("send sim signal".to_owned())
-            .or_insert(PerfCounter::new())
-            .start();
-        if !self.paused {
-            match self.sim_frame_start.send(elapsed) {
-                Ok(_) => {}
-                Err(e) => {
-                    println!("Error sending to sim thread: {}", e);
-                }
-            }
-        }
-        self.extra_perfs.get_mut("send sim signal").unwrap().stop();
-
-        self.extra_perfs
             .entry("update cameras".to_owned())
             .or_insert(PerfCounter::new())
             .start();
@@ -1020,12 +1012,31 @@ impl ApplicationHandler for App {
                     for (name, perf) in rcx.extra_perfs.iter() {
                         print!("  {}: {:?} ", name, perf);
                     }
+                    self.world.lock().perf.as_ref().map(|perf| {
+						for (name, counter) in perf.iter() {
+							println!("  Sim Perf {}: {:?} ms", name, counter);
+						}
+					});
                     println!("");
                     println!("Camera position: {:?}", rcx.camera.lock().pos);
                 }
                 *last_print = std::time::Instant::now();
             }
         }
+
+        self.extra_perfs
+            .entry("send sim signal".to_owned())
+            .or_insert(PerfCounter::new())
+            .start();
+        if !self.paused {
+            match self.sim_frame_start.send(elapsed) {
+                Ok(_) => {}
+                Err(e) => {
+                    println!("Error sending to sim thread: {}", e);
+                }
+            }
+        }
+        self.extra_perfs.get_mut("send sim signal").unwrap().stop();
         self.frame_time.stop();
     }
 }

@@ -14,7 +14,7 @@ use crate::{
     engine::Engine,
     gpu_manager::GPUManager,
     renderer::{_RendererComponent, RendererComponent},
-    transform::{self, _Transform, Transform, TransformHierarchy},
+    transform::{self, _Transform, Transform, TransformHierarchy, compute::PerfCounter},
 };
 use rayon::prelude::*;
 
@@ -198,7 +198,8 @@ where
                                 break;
                             }
                             let component = self._get_unchecked(current_idx as u32);
-                            let transform = transform_hierarchy.get_transform_unchecked(current_idx as u32);
+                            let transform =
+                                transform_hierarchy.get_transform_unchecked(current_idx as u32);
                             {
                                 let mut component_guard = component.lock();
                                 f(&mut *component_guard, &transform);
@@ -226,8 +227,17 @@ impl<T: Component + Clone + Send + Sync + 'static> ComponentStorageTrait for Com
     fn remove(&mut self, idx: u32) {
         self.delete(idx);
     }
-    fn update(&self, dt: f32, transform_hierarchy: &TransformHierarchy) {
+    fn update(
+        &self,
+        dt: f32,
+        transform_hierarchy: &TransformHierarchy,
+        perf: &mut Option<HashMap<String, PerfCounter>>,
+    ) {
+        let n = std::any::type_name::<T>();
+        perf.as_mut()
+            .map(|perf| perf.entry(n.into()).or_insert(PerfCounter::new()).start());
         self._update(dt, transform_hierarchy);
+        perf.as_mut().map(|perf| perf.get_mut(n).unwrap().stop());
     }
     fn clone_from_other(
         &mut self,
@@ -252,7 +262,12 @@ trait ComponentStorageTrait {
     fn as_any(&self) -> &dyn std::any::Any;
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
     fn remove(&mut self, idx: u32);
-    fn update(&self, dt: f32, transform_hierarchy: &TransformHierarchy);
+    fn update(
+        &self,
+        dt: f32,
+        transform_hierarchy: &TransformHierarchy,
+        perf: &mut Option<HashMap<String, PerfCounter>>,
+    );
     fn clone_from_other(
         &mut self,
         other: &dyn ComponentStorageTrait,
@@ -298,9 +313,14 @@ impl ComponentRegistry {
             .as_any_mut()
             .downcast_mut::<ComponentStorage<T>>()
     }
-    pub fn update_all(&self, dt: f32, transform_hierarchy: &TransformHierarchy) {
+    pub fn update_all(
+        &self,
+        dt: f32,
+        transform_hierarchy: &TransformHierarchy,
+        perf: &mut Option<HashMap<String, PerfCounter>>,
+    ) {
         for storage in self.components.values() {
-            storage.update(dt, transform_hierarchy);
+            storage.update(dt, transform_hierarchy, perf);
         }
     }
 }
@@ -346,6 +366,7 @@ pub struct Scene {
     pub components: ComponentRegistry,
     pub engine: Arc<Engine>,
     pub transform_hierarchy: TransformHierarchy,
+    pub perf: Option<HashMap<String, PerfCounter>>,
 }
 
 impl Scene {
@@ -354,10 +375,12 @@ impl Scene {
             components: ComponentRegistry::new(),
             engine,
             transform_hierarchy: TransformHierarchy::new(),
+            perf: None,
         }
     }
-    pub fn update(&self, dt: f32) {
-        self.components.update_all(dt, &self.transform_hierarchy);
+    pub fn update(&mut self, dt: f32) {
+        self.components
+            .update_all(dt, &self.transform_hierarchy, &mut self.perf);
     }
     pub fn new_entity(&mut self, t: _Transform) -> Entity {
         let entity = Entity::new(self.transform_hierarchy.create_transform(t).get_idx());
@@ -485,6 +508,7 @@ impl Scene {
                 }
             }
         }
-        self.transform_hierarchy.get_transform_unchecked(entity_map[&0])
+        self.transform_hierarchy
+            .get_transform_unchecked(entity_map[&0])
     }
 }

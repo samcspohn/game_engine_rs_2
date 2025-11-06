@@ -3,9 +3,13 @@ use std::{
     collections::VecDeque,
     fmt::Debug,
     ops::{Div, Mul},
-    sync::{Arc, atomic::AtomicU32},
+    sync::{
+        Arc,
+        atomic::{AtomicU32, AtomicUsize},
+    },
 };
 
+use dashmap::DashMap;
 use parking_lot::Mutex;
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
@@ -447,27 +451,52 @@ impl TransformCompute {
             let _flags = &flags_cell;
 
             let dirty = &hierarchy.dirty;
-            let dirty_par_iter = dirty
+            // let dirty_par_iter = dirty
+            //     .position
+            //     .par_iter();
+            // .zip_eq(dirty.rotation.par_iter())
+            // .zip_eq(dirty.scale.par_iter())
+            // .zip_eq(dirty.parent.par_iter());
+
+            // dirty_par_iter
+            // (0..dirty.position.len()).into_par_iter()
+            //     .chunks(32)
+            //     .for_each(|dirty_chunks| {
+            let chunk_size = 32;
+            let thread_work_size = dirty
                 .position
-                .par_iter()
-                .zip_eq(dirty.rotation.par_iter())
-                .zip_eq(dirty.scale.par_iter())
-                .zip_eq(dirty.parent.par_iter());
+                .len()
+                .div_ceil(rayon::current_num_threads())
+                .max(chunk_size);
+            let num_threads = dirty.position.len().div_ceil(thread_work_size);
+            assert!(num_threads <= rayon::current_num_threads());
+            // let work_table = DashMap::new();
+            (0..num_threads).into_par_iter().for_each(|thread_index| {
+                let start_idx = AtomicUsize::new(thread_index * thread_work_size);
+                let end_idx = ((thread_index + 1) * thread_work_size).min(dirty.position.len());
+                let thread_index = rayon::current_thread_index().unwrap_or(0);
+                // work_table.insert(thread_index, (start_idx, end_idx));
+                let mut _parent_updates = &mut parent_updates[thread_index].lock();
+                let poss = unsafe { &mut *pos.get() };
+                let rots = unsafe { &mut *rot.get() };
+                let scales = unsafe { &mut *scale.get() };
+                let flags = unsafe { &mut *(_flags.get()) };
+                let hierarchy = unsafe { &*(_hierarchy.get()) };
 
-            dirty_par_iter
-                .enumerate()
-                .chunks(32)
-                .for_each(|dirty_chunks| {
-                    let thread_index = rayon::current_thread_index().unwrap_or(0);
-                    let mut _parent_updates = &mut parent_updates[thread_index].lock();
-                    let poss = unsafe { &mut *pos.get() };
-                    let rots = unsafe { &mut *rot.get() };
-                    let scales = unsafe { &mut *scale.get() };
-                    let flags = unsafe { &mut *(_flags.get()) };
-
-                    for dirty in dirty_chunks {
-                        let (idx, (((pos_bits, rot_bits), scl_bits), parent_bits)) = dirty;
-                        // let idx = *idx as usize;
+                // for idx in dirty_chunks {
+                // let (idx, pos_bits) = dirty;
+                // let idx = *idx as usize;
+                // let work = work_table.get(&thread_index).unwrap();
+                let work = (start_idx, end_idx);
+                let mut idx1 = work
+                    .0
+                    .fetch_add(chunk_size, std::sync::atomic::Ordering::SeqCst);
+                while idx1 < work.1 {
+                    for idx in idx1..(idx1 + chunk_size).min(work.1) {
+                        let pos_bits = &hierarchy.dirty.position[idx];
+                        let rot_bits = &hierarchy.dirty.rotation[idx];
+                        let scl_bits = &hierarchy.dirty.scale[idx];
+                        let parent_bits = &hierarchy.dirty.parent[idx];
 
                         let pos_bits = unsafe { &mut *pos_bits.as_ptr() };
                         let rot_bits = unsafe { &mut *rot_bits.as_ptr() };
@@ -546,9 +575,10 @@ impl TransformCompute {
                         flags[idx * 3 + 0] = pos_flag;
                         flags[idx * 3 + 1] = rot_flag;
                         flags[idx * 3 + 2] = scl_flag;
+                        idx1 = work.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
-                });
-
+                }
+            });
 
             self.perf_counters.update_bufs.stop();
             self.perf_counters.update_parents.start();

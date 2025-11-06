@@ -17,6 +17,7 @@ debug = true
 [dependencies]
 core_affinity = "0.8.3"
 dary_heap = "0.3.8"
+dashmap = "6.1.0"
 downcast-rs = "2.0.2"
 egui = { version = "0.31.1", features = ["persistence"] }
 egui_winit_vulkano = "0.28.0"

@@ -14,7 +14,7 @@ use crate::{
     engine::Engine,
     gpu_manager::GPUManager,
     renderer::{_RendererComponent, RendererComponent},
-    transform::{self, _Transform, Transform, TransformHierarchy, compute::PerfCounter},
+    transform::{self, _Transform, Transform, TransformHierarchy, compute::PerfCounter}, util::seg_storage::{SegStorage, get_from_slice},
 };
 use rayon::prelude::*;
 
@@ -25,7 +25,8 @@ pub trait Component {
 }
 
 pub struct ComponentStorage<T> {
-    data: Vec<MaybeUninit<Mutex<T>>>,
+    // data: Vec<MaybeUninit<Mutex<T>>>,
+    data: SegStorage<Mutex<T>>,
     extent: usize,
     // avail: Vec<usize>,
     active: Vec<AtomicU32>,
@@ -37,7 +38,7 @@ where
 {
     pub fn new(has_update: bool) -> Self {
         Self {
-            data: Vec::new(),
+            data: SegStorage::new(),
             extent: 0,
             // avail: Vec::new(),
             active: Vec::new(),
@@ -45,22 +46,29 @@ where
         }
     }
     pub fn set(&mut self, t_idx: u32, item: T) -> u32 {
+        // let idx = t_idx as usize;
+        // if idx >= self.data.len() {
+        //     self.data.resize_with(idx + 1, || MaybeUninit::uninit());
+        //     unsafe {
+        //         self.data[idx].as_mut_ptr().write(Mutex::new(item));
+        //     }
+        //     let required_active_len = (idx >> 5) + 1;
+        //     if required_active_len > self.active.len() {
+        //         self.active
+        //             .resize_with(required_active_len, || AtomicU32::new(0));
+        //     }
+        // } else {
+        //     unsafe {
+        //         self.data[idx].as_mut_ptr().write(Mutex::new(item));
+        //     }
+        // }
         let idx = t_idx as usize;
-        if idx >= self.data.len() {
-            self.data.resize_with(idx + 1, || MaybeUninit::uninit());
-            unsafe {
-                self.data[idx].as_mut_ptr().write(Mutex::new(item));
-            }
-            let required_active_len = (idx >> 5) + 1;
-            if required_active_len > self.active.len() {
-                self.active
-                    .resize_with(required_active_len, || AtomicU32::new(0));
-            }
-        } else {
-            unsafe {
-                self.data[idx].as_mut_ptr().write(Mutex::new(item));
-            }
-        }
+        self.data.set(idx, Mutex::new(item));
+		let required_active_len = (idx >> 5) + 1;
+		if required_active_len > self.active.len() {
+			self.active
+				.resize_with(required_active_len, || AtomicU32::new(0));
+		}
         if idx >= self.extent {
             self.extent = idx + 1;
         }
@@ -69,34 +77,49 @@ where
         self.active[atomic_idx].fetch_or(1 << bit_idx, std::sync::atomic::Ordering::Relaxed);
         idx as u32
     }
-    #[inline]
-    fn _get_unchecked(&self, idx: u32) -> &Mutex<T> {
-        unsafe { &*self.data.get_unchecked(idx as usize).assume_init_ref() }
-    }
+    // #[inline]
+    // fn _get_unchecked(&self, idx: u32) -> &Mutex<T> {
+    //     unsafe { &*self.data.get_unchecked(idx as usize).assume_init_ref() }
+    // }
     #[inline]
     fn is_active(&self, idx: u32) -> bool {
         let atomic_idx = (idx >> 5) as usize;
         let bit_idx = idx & 31;
         (self.active[atomic_idx].load(std::sync::atomic::Ordering::Relaxed) & (1 << bit_idx)) != 0
     }
-    pub fn delete(&mut self, idx: u32) {
-        if (idx as usize) < self.data.len() && self.is_active(idx) {
-            let atomic_idx = (idx >> 5) as usize;
-            let bit_idx = idx & 31;
-            self.active[atomic_idx]
-                .fetch_and(!(1 << bit_idx), std::sync::atomic::Ordering::Relaxed);
-            // self.avail.push(idx as usize);
-            unsafe {
-                self.data.get_unchecked_mut(idx as usize).assume_init_drop();
-            }
-        }
-    }
+    // pub fn delete(&mut self, idx: u32) {
+    //     if (idx as usize) < self.data.len() && self.is_active(idx) {
+    //         let atomic_idx = (idx >> 5) as usize;
+    //         let bit_idx = idx & 31;
+    //         self.active[atomic_idx]
+    //             .fetch_and(!(1 << bit_idx), std::sync::atomic::Ordering::Relaxed);
+    //         // self.avail.push(idx as usize);
+    //         unsafe {
+    //             self.data.get_unchecked_mut(idx as usize).assume_init_drop();
+    //         }
+    //     }
+    // }
+    pub fn drop(&mut self, idx: u32) {
+		if (idx as usize) < self.data.len() && self.is_active(idx) {
+			let atomic_idx = (idx >> 5) as usize;
+			let bit_idx = idx & 31;
+			self.active[atomic_idx]
+				.fetch_and(!(1 << bit_idx), std::sync::atomic::Ordering::Relaxed);
+			// self.avail.push(idx as usize);
+			self.data.drop(idx as usize);
+		}
+	}
     pub fn get(&self, idx: u32) -> Option<&Mutex<T>> {
+        // if (idx as usize) < self.data.len() && self.is_active(idx) {
+        //     Some(&self._get_unchecked(idx))
+        // } else {
+        //     None
+        // }
         if (idx as usize) < self.data.len() && self.is_active(idx) {
-            Some(&self._get_unchecked(idx))
-        } else {
-            None
-        }
+			Some(self.data.get_unchecked(idx as usize))
+		} else {
+			None
+		}
     }
     fn par_iter<F>(&self, f: F, transform_hierarchy: &TransformHierarchy)
     where
@@ -191,21 +214,41 @@ where
                         continue; // skip if no active components in this chunk
                     }
                     let base_idx = atomic_idx << 5;
-                    for bit_idx in 0..32 {
-                        if (bits & (1 << bit_idx)) != 0 {
-                            let current_idx = base_idx + bit_idx;
-                            if current_idx >= self.extent {
-                                break;
-                            }
-                            let component = self._get_unchecked(current_idx as u32);
-                            let transform =
-                                transform_hierarchy.get_transform_unchecked(current_idx as u32);
-                            {
-                                let mut component_guard = component.lock();
-                                f(&mut *component_guard, &transform);
-                            }
-                        }
-                    }
+                    let chunk = self.data.get_segment_chunk(base_idx);
+					if let Some(chunk) = chunk {
+						for bit_idx in 0..32 {
+							if (bits & (1 << bit_idx)) != 0 {
+								let current_idx = base_idx + bit_idx;
+								if current_idx >= self.extent {
+									break;
+								}
+								// let component = &chunk[bit_idx];
+								let component = get_from_slice(chunk, bit_idx);
+								let transform =
+									transform_hierarchy.get_transform_unchecked(current_idx as u32);
+								{
+									let mut component_guard = component.lock();
+									f(&mut *component_guard, &transform);
+								}
+							}
+						}
+					}
+                    // for bit_idx in 0..32 {
+                    //     if (bits & (1 << bit_idx)) != 0 {
+                    //         let current_idx = base_idx + bit_idx;
+                    //         if current_idx >= self.extent {
+                    //             break;
+                    //         }
+                    //         // let component = self._get_unchecked(current_idx as u32);
+                    //         self.data.get_unchecked(current_idx)
+                    //         let transform =
+                    //             transform_hierarchy.get_transform_unchecked(current_idx as u32);
+                    //         {
+                    //             let mut component_guard = component.lock();
+                    //             f(&mut *component_guard, &transform);
+                    //         }
+                    //     }
+                    // }
                 }
             });
     }
@@ -225,7 +268,7 @@ impl<T: Component + Clone + Send + Sync + 'static> ComponentStorageTrait for Com
         self
     }
     fn remove(&mut self, idx: u32) {
-        self.delete(idx);
+        self.drop(idx);
     }
     fn update(
         &self,
@@ -414,7 +457,7 @@ impl Scene {
                 let t = self.transform_hierarchy.get_transform_unchecked(entity.id);
                 component.deinit(&t, &self.engine);
             }
-            storage.delete(entity.id);
+            storage.drop(entity.id);
         }
     }
 

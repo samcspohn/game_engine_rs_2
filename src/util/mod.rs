@@ -9,6 +9,8 @@ pub use avail::Avail;
 mod storage;
 pub use storage::Storage;
 pub mod container;
+// a segvec like structure that holds items with min chunk size or 32 corresponding to the active bits of the ComponentStorafe container
+pub mod seg_storage;
 
 pub fn get_chunk_size(num_items: usize) -> usize {
     let chunk_size = ((num_items as f32).sqrt().ceil() as usize).max(1);

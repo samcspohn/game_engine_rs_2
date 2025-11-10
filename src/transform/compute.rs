@@ -462,7 +462,7 @@ impl TransformCompute {
             // (0..dirty.position.len()).into_par_iter()
             //     .chunks(32)
             //     .for_each(|dirty_chunks| {
-            let chunk_size = 32;
+            let chunk_size = 8;
             let thread_work_size = dirty
                 .position
                 .len()

@@ -414,9 +414,9 @@ impl TransformCompute {
         self.perf_counters.update_bufs.start();
 
         let (parent_updates_len, parent_updates) = {
-            let parent_updates: Arc<Vec<Mutex<Vec<(u32, u32)>>>> = Arc::new(
+            let parent_updates: Arc<Vec<std::sync::Mutex<Vec<(u32, u32)>>>> = Arc::new(
                 (0..rayon::current_num_threads())
-                    .map(|_| Mutex::new(Vec::new()))
+                    .map(|_| std::sync::Mutex::new(Vec::new()))
                     .collect(),
             );
 
@@ -476,7 +476,7 @@ impl TransformCompute {
                 let end_idx = ((thread_index + 1) * thread_work_size).min(dirty.position.len());
                 let thread_index = rayon::current_thread_index().unwrap_or(0);
                 // work_table.insert(thread_index, (start_idx, end_idx));
-                let mut _parent_updates = &mut parent_updates[thread_index].lock();
+                let mut _parent_updates = &mut parent_updates[thread_index].lock().unwrap();
                 let poss = unsafe { &mut *pos.get() };
                 let rots = unsafe { &mut *rot.get() };
                 let scales = unsafe { &mut *scale.get() };
@@ -584,9 +584,10 @@ impl TransformCompute {
             self.perf_counters.update_parents.start();
             let parent_updates = Arc::try_unwrap(parent_updates).unwrap();
 
-            let parent_updates = parent_updates
+            let parent_updates: Vec<(u32, u32)> = parent_updates
                 .into_iter()
                 .flat_map(|m| m.into_inner())
+                .flat_map(|v| v)
                 .collect::<Vec<_>>();
             let parent_updates_len = parent_updates.len();
             let parent_indices = gpu

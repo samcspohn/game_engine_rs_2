@@ -20,6 +20,21 @@ fn get_seg_index(index: usize) -> (usize, usize) {
     (seg_index, local_index)
 }
 
+#[inline(always)]
+fn get_seg_index_(idx: usize) -> (usize, usize) {
+ // Adjust index to make math cleaner: this maps segment boundaries to powers of 2
+    let adjusted = (idx + 32) >> 5;
+
+    // Find segment: position of most significant bit
+    // This is equivalent to floor(log2(adjusted))
+    let segment = (usize::BITS - 1 - adjusted.leading_zeros()) as usize;
+
+    // Calculate local index within segment
+    let local = idx + 32 - (32 << segment);
+
+    (segment, local)
+}
+
 impl<T> SegStorage<T> {
     pub fn new() -> Self {
         Self {
@@ -60,7 +75,7 @@ impl<T> SegStorage<T> {
     #[inline(always)]
     pub fn get_unchecked(&self, index: usize) -> &T {
         let (seg_index, local_index) = get_seg_index(index);
-        unsafe { &*self.segments[seg_index][local_index].as_ptr() }
+        unsafe { &*self.segments.get_unchecked(seg_index).get_unchecked(local_index).as_ptr() }
     }
 
     #[inline(always)]
@@ -77,6 +92,12 @@ impl<T> SegStorage<T> {
 			&segment[local_index..local_index + 32.min(segment.len() - local_index)]
 		})
     }
+    #[inline(always)]
+    pub fn get_segment_chunk_unchecked(&self, start_index: usize) -> &[MaybeUninit<T>] {
+		let (seg_index, local_index) = get_seg_index(start_index);
+		// &self.segments.seg_index][local_index..local_index + 32]
+		unsafe { self.segments.get_unchecked(seg_index).get_unchecked(local_index..local_index + 32) }
+	}
 
     pub fn len(&self) -> usize {
         self.len
@@ -86,4 +107,10 @@ impl<T> SegStorage<T> {
 #[inline(always)]
 pub fn get_from_slice<T>(s: &[MaybeUninit<T>], local_index: usize) -> &T {
     unsafe { &*s[local_index].as_ptr() }
+}
+
+
+#[inline(always)]
+pub fn get_from_slice_unchecked<T>(s: &[MaybeUninit<T>], local_index: usize) -> &T {
+    unsafe { &*s.get_unchecked(local_index).as_ptr() }
 }

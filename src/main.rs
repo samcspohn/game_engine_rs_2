@@ -1012,6 +1012,7 @@ impl ApplicationHandler for App {
                     for (name, perf) in rcx.extra_perfs.iter() {
                         print!("  {}: {:?} ", name, perf);
                     }
+                    println!("");
                     self.world.lock().perf.as_ref().map(|perf| {
 						for (name, counter) in perf.iter() {
 							println!("  Sim Perf {}: {:?} ms", name, counter);

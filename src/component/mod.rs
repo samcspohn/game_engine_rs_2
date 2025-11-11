@@ -14,7 +14,8 @@ use crate::{
     engine::Engine,
     gpu_manager::GPUManager,
     renderer::{_RendererComponent, RendererComponent},
-    transform::{self, _Transform, Transform, TransformHierarchy, compute::PerfCounter}, util::seg_storage::{SegStorage, get_from_slice},
+    transform::{self, _Transform, Transform, TransformHierarchy, compute::PerfCounter},
+    util::seg_storage::{SegStorage, get_from_slice, get_from_slice_unchecked},
 };
 use rayon::prelude::*;
 
@@ -64,11 +65,11 @@ where
         // }
         let idx = t_idx as usize;
         self.data.set(idx, Mutex::new(item));
-		let required_active_len = (idx >> 5) + 1;
-		if required_active_len > self.active.len() {
-			self.active
-				.resize_with(required_active_len, || AtomicU32::new(0));
-		}
+        let required_active_len = (idx >> 5) + 1;
+        if required_active_len > self.active.len() {
+            self.active
+                .resize_with(required_active_len, || AtomicU32::new(0));
+        }
         if idx >= self.extent {
             self.extent = idx + 1;
         }
@@ -100,15 +101,15 @@ where
     //     }
     // }
     pub fn drop(&mut self, idx: u32) {
-		if (idx as usize) < self.data.len() && self.is_active(idx) {
-			let atomic_idx = (idx >> 5) as usize;
-			let bit_idx = idx & 31;
-			self.active[atomic_idx]
-				.fetch_and(!(1 << bit_idx), std::sync::atomic::Ordering::Relaxed);
-			// self.avail.push(idx as usize);
-			self.data.drop(idx as usize);
-		}
-	}
+        if (idx as usize) < self.data.len() && self.is_active(idx) {
+            let atomic_idx = (idx >> 5) as usize;
+            let bit_idx = idx & 31;
+            self.active[atomic_idx]
+                .fetch_and(!(1 << bit_idx), std::sync::atomic::Ordering::Relaxed);
+            // self.avail.push(idx as usize);
+            self.data.drop(idx as usize);
+        }
+    }
     pub fn get(&self, idx: u32) -> Option<&Mutex<T>> {
         // if (idx as usize) < self.data.len() && self.is_active(idx) {
         //     Some(&self._get_unchecked(idx))
@@ -116,10 +117,10 @@ where
         //     None
         // }
         if (idx as usize) < self.data.len() && self.is_active(idx) {
-			Some(self.data.get_unchecked(idx as usize))
-		} else {
-			None
-		}
+            Some(self.data.get_unchecked(idx as usize))
+        } else {
+            None
+        }
     }
     fn par_iter<F>(&self, f: F, transform_hierarchy: &TransformHierarchy)
     where
@@ -214,25 +215,25 @@ where
                         continue; // skip if no active components in this chunk
                     }
                     let base_idx = atomic_idx << 5;
-                    let chunk = self.data.get_segment_chunk(base_idx);
-					if let Some(chunk) = chunk {
-						for bit_idx in 0..32 {
-							if (bits & (1 << bit_idx)) != 0 {
-								let current_idx = base_idx + bit_idx;
-								if current_idx >= self.extent {
-									break;
-								}
-								// let component = &chunk[bit_idx];
-								let component = get_from_slice(chunk, bit_idx);
-								let transform =
-									transform_hierarchy.get_transform_unchecked(current_idx as u32);
-								{
-									let mut component_guard = component.lock();
-									f(&mut *component_guard, &transform);
-								}
-							}
-						}
-					}
+                    let chunk = self.data.get_segment_chunk_unchecked(base_idx);
+                    for bit_idx in 0..32 {
+                        if (bits & (1 << bit_idx)) != 0 {
+                            let current_idx = base_idx + bit_idx;
+                            if current_idx >= self.extent {
+                                break;
+                            }
+                            // let component = &chunk[bit_idx];
+                            let component = get_from_slice_unchecked(chunk, bit_idx);
+                            // let component = self.data.get_unchecked(current_idx);
+                            let transform =
+                                transform_hierarchy.get_transform_unchecked(current_idx as u32);
+                            {
+                                let mut component_guard = component.lock();
+                                f(&mut *component_guard, &transform);
+                            }
+                        }
+                    }
+
                     // for bit_idx in 0..32 {
                     //     if (bits & (1 << bit_idx)) != 0 {
                     //         let current_idx = base_idx + bit_idx;

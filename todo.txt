@@ -1,1 +1,3 @@
-transform compute should be run in render thread with previous frame clean up
+transform compute should be run in render thread with previous frame clean up/ not necessary with aquire_buf
+
+when updating multiple components on an entity, unless update depends on previous component, we can batch them together to avoid multiple iterations over the same entity

@@ -267,7 +267,7 @@ impl TransformCompute {
                 MemoryTypeFilter::PREFER_DEVICE,
                 BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
             ),
-            staging_buffers: (0..MAX_FRAMES_IN_FLIGHT + 1)
+            staging_buffers: (0..MAX_FRAMES_IN_FLIGHT)
                 .map(|_| TransformUpdateBuffers::new(gpu))
                 .collect(),
             staging_buffer_index: 0,
@@ -411,7 +411,6 @@ impl TransformCompute {
             );
             ret = true;
         }
-        self.perf_counters.update_bufs.start();
 
         let (parent_updates_len, parent_updates) = {
             let parent_updates: Arc<Vec<std::sync::Mutex<Vec<(u32, u32)>>>> = Arc::new(
@@ -444,6 +443,7 @@ impl TransformCompute {
             self.perf_counters.aquire_bufs.stop();
             // let dirty_l2 = SyncUnsafeCell::new(self.staging_buffers[sbi].dirty_l2.write().unwrap());
             let _hierarchy = SyncUnsafeCell::new(hierarchy);
+            self.perf_counters.update_bufs.start();
 
             let pos = &pos_cell;
             let rot = &rot_cell;

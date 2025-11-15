@@ -1,0 +1,28 @@
+#version 450
+
+// Copy depth buffer to Hi-Z mip level 0
+// Converts from D32_SFLOAT (depth format) to R32_SFLOAT (color format)
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Input: depth buffer as sampled texture
+layout(set = 0, binding = 0) uniform sampler2D srcDepth;
+
+// Output: Hi-Z mip level 0 as storage image
+layout(set = 0, binding = 1, r32f) writeonly uniform image2D dstHizMip0;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(dstHizMip0);
+
+    // Bounds check
+    if (coord.x >= size.x || coord.y >= size.y) {
+        return;
+    }
+
+    // Read depth value from depth buffer
+    float depth = texelFetch(srcDepth, coord, 0).r;
+
+    // Write to Hi-Z mip 0
+    imageStore(dstHizMip0, coord, vec4(depth));
+}

@@ -7,7 +7,11 @@ use vulkano::{
     buffer::{BufferUsage, Subbuffer},
     command_buffer::{AutoCommandBufferBuilder, CopyBufferInfo, PrimaryAutoCommandBuffer},
     format::Format,
-    image::{Image, ImageCreateInfo, ImageTiling, ImageType, ImageUsage, view::ImageView},
+    image::{
+        Image, ImageCreateInfo, ImageTiling, ImageType, ImageUsage, 
+        view::{ImageView, ImageViewCreateInfo},
+        ImageAspects, ImageSubresourceRange,
+    },
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
 };
 use winit::keyboard::KeyCode;
@@ -19,9 +23,14 @@ pub struct Camera {
     pub far: f32,
     pub image: Arc<Image>,
     pub image_view: Arc<ImageView>,
+    pub depth_image: Arc<Image>,
     pub depth_view: Arc<ImageView>,
     pub uniform: Subbuffer<crate::vs::camera>,
     pub format: Format,
+    pub hiz_image: Option<Arc<Image>>,
+    pub hiz_views: Option<Vec<Arc<ImageView>>>,
+    pub hiz_view_all_mips: Option<Arc<ImageView>>,
+    pub hiz_mip_levels: u32,
 }
 
 impl Camera {
@@ -66,7 +75,7 @@ impl Camera {
             },
         )
         .unwrap();
-        let depth_view = ImageView::new_default(depth_image).unwrap();
+        let depth_view = ImageView::new_default(depth_image.clone()).unwrap();
 
         let uniform = gpu.buffer_from_data(
             &crate::vs::camera {
@@ -80,13 +89,84 @@ impl Camera {
             rot: Quat::IDENTITY,
             image,
             image_view,
+            depth_image,
             depth_view,
             uniform,
             format,
             near,
             far,
+            hiz_image: None,
+            hiz_views: None,
+            hiz_view_all_mips: None,
+            hiz_mip_levels: 0,
         }
     }
+
+    /// Create Hi-Z image and views for occlusion culling
+    pub fn create_hiz(&mut self, gpu: &GPUManager, dimensions: [u32; 2]) {
+        let hiz_mip_levels = {
+            let max_dimension = dimensions[0].max(dimensions[1]);
+            (max_dimension as f32).log2().floor() as u32 + 1
+        };
+
+        let hiz_image = Image::new(
+            gpu.mem_alloc.clone(),
+            ImageCreateInfo {
+                image_type: ImageType::Dim2d,
+                format: Format::R32_SFLOAT,
+                extent: [dimensions[0], dimensions[1], 1],
+                mip_levels: hiz_mip_levels,
+                usage: ImageUsage::STORAGE
+                    | ImageUsage::SAMPLED
+                    | ImageUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let hiz_views: Vec<_> = (0..hiz_mip_levels)
+            .map(|mip| {
+                ImageView::new(
+                    hiz_image.clone(),
+                    ImageViewCreateInfo {
+                        format: Format::R32_SFLOAT,
+                        subresource_range: ImageSubresourceRange {
+                            aspects: ImageAspects::COLOR,
+                            mip_levels: mip..(mip + 1),
+                            array_layers: 0..1,
+                        },
+                        ..ImageViewCreateInfo::from_image(&hiz_image)
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+
+        // Create view of ALL mip levels for shader sampling
+        let hiz_view_all_mips = ImageView::new(
+            hiz_image.clone(),
+            ImageViewCreateInfo {
+                format: Format::R32_SFLOAT,
+                subresource_range: ImageSubresourceRange {
+                    aspects: ImageAspects::COLOR,
+                    mip_levels: 0..hiz_mip_levels,
+                    array_layers: 0..1,
+                },
+                ..ImageViewCreateInfo::from_image(&hiz_image)
+            },
+        )
+        .unwrap();
+
+        self.hiz_image = Some(hiz_image);
+        self.hiz_views = Some(hiz_views);
+        self.hiz_view_all_mips = Some(hiz_view_all_mips);
+        self.hiz_mip_levels = hiz_mip_levels;
+    }
+
     pub fn resize(&mut self, gpu: &GPUManager, dimensions: [u32; 2]) {
         let image = Image::new(
             gpu.mem_alloc.clone(),
@@ -128,7 +208,8 @@ impl Camera {
             },
         )
         .unwrap();
-        self.depth_view = ImageView::new_default(depth_image).unwrap();
+        self.depth_view = ImageView::new_default(depth_image.clone()).unwrap();
+        self.depth_image = depth_image;
     }
     pub fn get_view_matrix(&self) -> glam::Mat4 {
 

@@ -68,6 +68,9 @@ layout(set = 0, binding = 8) buffer MaterialIds {
     uint material_ids[];
 };
 
+// Hi-Z buffer for occlusion culling (optional - may be dummy texture if not initialized)
+layout(set = 1, binding = 0) uniform sampler2D hizBuffer;
+
 layout(set = 1, binding = 1) uniform camera {
     mat4 view;
     mat4 proj;

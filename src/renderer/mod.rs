@@ -16,7 +16,7 @@ use vulkano::{
         DrawIndexedIndirectCommand, PrimaryAutoCommandBuffer,
     },
     descriptor_set::{DescriptorSet, WriteDescriptorSet},
-    image::{sampler::Sampler, view::ImageView},
+    image::{Image, sampler::Sampler, view::ImageView},
     memory::allocator::MemoryTypeFilter,
     pipeline::{
         ComputePipeline, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
@@ -44,6 +44,8 @@ mod cs {
     }
 }
 
+mod occlusion_culling;
+
 #[derive(BufferContents, Copy, Clone, Default)]
 #[repr(C)]
 struct Renderer {
@@ -60,6 +62,8 @@ pub struct RenderingSystem {
     gpu: Arc<GPUManager>,
     pipeline: Arc<ComputePipeline>,
     pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
+    hiz_sampler: Arc<vulkano::image::sampler::Sampler>,
+    dummy_hiz_view: Arc<ImageView>,
     // buffers
     indirect_commands_buffer: GpuVec<DrawIndexedIndirectCommand>,
     // indirect_texture_vec: GpuVec<u32>, // texture per indirect draw command -> change to material per indirect draw command
@@ -169,13 +173,47 @@ impl RenderingSystem {
         .unwrap();
         let pipeline = ComputePipeline::new(
             gpu.device.clone(),
-            Some(gpu.pipeline_cache.clone()),
+            None,
             ComputePipelineCreateInfo::stage_layout(stage, layout),
         )
         .unwrap();
+
+        // Create Hi-Z sampler for occlusion culling
+        let hiz_sampler = vulkano::image::sampler::Sampler::new(
+            gpu.device.clone(),
+            vulkano::image::sampler::SamplerCreateInfo {
+                mag_filter: vulkano::image::sampler::Filter::Nearest,
+                min_filter: vulkano::image::sampler::Filter::Nearest,
+                mipmap_mode: vulkano::image::sampler::SamplerMipmapMode::Nearest,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Create dummy 1x1 Hi-Z texture for when Hi-Z is not available
+        let dummy_hiz_image = Image::new(
+            gpu.mem_alloc.clone(),
+            vulkano::image::ImageCreateInfo {
+                image_type: vulkano::image::ImageType::Dim2d,
+                format: vulkano::format::Format::R32_SFLOAT,
+                extent: [1, 1, 1],
+                mip_levels: 1,
+                usage: vulkano::image::ImageUsage::SAMPLED | vulkano::image::ImageUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            vulkano::memory::allocator::AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let dummy_hiz_view = ImageView::new_default(dummy_hiz_image).unwrap();
+
         Self {
             command_buffer: None,
             pipeline,
+            hiz_sampler,
+            dummy_hiz_view,
             indirect_commands_buffer: GpuVec::new(
                 &gpu,
                 BufferUsage::INDIRECT_BUFFER | BufferUsage::STORAGE_BUFFER,
@@ -528,6 +566,7 @@ impl RenderingSystem {
         cam: Subbuffer<crate::vs::camera>,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         matrix_data: &Subbuffer<[crate::transform::compute::cs::MatrixData]>,
+        camera: &crate::camera::Camera,
     ) {
         builder
             .bind_pipeline_compute(self.pipeline.clone())
@@ -551,13 +590,32 @@ impl RenderingSystem {
         )
         .unwrap();
         let layout1 = self.pipeline.layout().set_layouts().get(1).unwrap();
-        let set1 = DescriptorSet::new(
-            self.gpu.desc_alloc.clone(),
-            layout1.clone(),
-            [WriteDescriptorSet::buffer(1, cam)],
-            [],
-        )
-        .unwrap();
+
+        // Bind Hi-Z buffer if available, otherwise use dummy texture
+        let set1 = if let Some(hiz_view) = &camera.hiz_view_all_mips {
+            DescriptorSet::new(
+                self.gpu.desc_alloc.clone(),
+                layout1.clone(),
+                [
+                    // WriteDescriptorSet::image_view_sampler(0, hiz_view.clone(), self.hiz_sampler.clone()),
+                    WriteDescriptorSet::buffer(1, cam),
+                ],
+                [],
+            )
+            .unwrap()
+        } else {
+            // No Hi-Z available, bind dummy 1x1 texture
+            DescriptorSet::new(
+                self.gpu.desc_alloc.clone(),
+                layout1.clone(),
+                [
+                    // WriteDescriptorSet::image_view_sampler(0, self.dummy_hiz_view.clone(), self.hiz_sampler.clone()),
+                    WriteDescriptorSet::buffer(1, cam),
+                ],
+                [],
+            )
+            .unwrap()
+        };
         let layout2 = self.pipeline.layout().set_layouts().get(2).unwrap();
         for i in 7..=8 {
             let set2 = DescriptorSet::new(

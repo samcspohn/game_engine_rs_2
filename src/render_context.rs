@@ -297,6 +297,7 @@ impl RenderContext {
         assets: &AssetManager,
         rendering_system: &mut crate::renderer::RenderingSystem,
         matrix_data: &Subbuffer<[crate::transform::compute::cs::MatrixData]>,
+        // add camera
     ) {
         let window_size = self.window.inner_size();
 
@@ -304,7 +305,7 @@ impl RenderContext {
         camera.resize(gpu, [window_size.width, window_size.height]);
 
         let mut builder = gpu.create_command_buffer(CommandBufferUsage::SimultaneousUse);
-        rendering_system.update_mvp(camera.uniform.clone(), &mut builder, matrix_data);
+        rendering_system.update_mvp(camera.uniform.clone(), &mut builder, matrix_data, &camera);
 
         builder
             .begin_rendering(RenderingInfo {

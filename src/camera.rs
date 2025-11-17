@@ -8,9 +8,9 @@ use vulkano::{
     command_buffer::{AutoCommandBufferBuilder, CopyBufferInfo, PrimaryAutoCommandBuffer},
     format::Format,
     image::{
-        Image, ImageCreateInfo, ImageTiling, ImageType, ImageUsage, 
+        Image, ImageAspects, ImageCreateInfo, ImageSubresourceRange, ImageTiling, ImageType,
+        ImageUsage,
         view::{ImageView, ImageViewCreateInfo},
-        ImageAspects, ImageSubresourceRange,
     },
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
 };
@@ -26,6 +26,7 @@ pub struct Camera {
     pub depth_image: Arc<Image>,
     pub depth_view: Arc<ImageView>,
     pub uniform: Subbuffer<crate::vs::camera>,
+    pub uniform_hi_z_info: Subbuffer<crate::renderer::cs::HiZInfo>,
     pub format: Format,
     pub hiz_image: Option<Arc<Image>>,
     pub hiz_views: Option<Vec<Arc<ImageView>>>,
@@ -65,7 +66,8 @@ impl Camera {
                 mip_levels: 1,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT
                     | ImageUsage::TRANSFER_SRC
-                    | ImageUsage::TRANSFER_DST,
+                    | ImageUsage::TRANSFER_DST
+                    | ImageUsage::SAMPLED,
                 tiling: ImageTiling::Optimal,
                 ..Default::default()
             },
@@ -84,7 +86,16 @@ impl Camera {
             },
             BufferUsage::UNIFORM_BUFFER,
         );
-        Self {
+        let uniform_hi_z_info = gpu.buffer_from_data(
+            &crate::renderer::cs::HiZInfo {
+                screenResolution: [dimensions[0] as i32, dimensions[1] as i32],
+                // mip_levels: 0,
+                // _pad: [0; 3],
+            },
+            BufferUsage::UNIFORM_BUFFER,
+        );
+
+        let mut cam = Self {
             pos: Vec3::ZERO,
             rot: Quat::IDENTITY,
             image,
@@ -92,6 +103,7 @@ impl Camera {
             depth_image,
             depth_view,
             uniform,
+            uniform_hi_z_info,
             format,
             near,
             far,
@@ -99,7 +111,9 @@ impl Camera {
             hiz_views: None,
             hiz_view_all_mips: None,
             hiz_mip_levels: 0,
-        }
+        };
+        cam.create_hiz(gpu, dimensions);
+        cam
     }
 
     /// Create Hi-Z image and views for occlusion culling
@@ -116,9 +130,7 @@ impl Camera {
                 format: Format::R32_SFLOAT,
                 extent: [dimensions[0], dimensions[1], 1],
                 mip_levels: hiz_mip_levels,
-                usage: ImageUsage::STORAGE
-                    | ImageUsage::SAMPLED
-                    | ImageUsage::TRANSFER_DST,
+                usage: ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
                 ..Default::default()
             },
             AllocationCreateInfo {
@@ -198,7 +210,8 @@ impl Camera {
                 mip_levels: 1,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT
                     | ImageUsage::TRANSFER_SRC
-                    | ImageUsage::TRANSFER_DST,
+                    | ImageUsage::TRANSFER_DST
+                    | ImageUsage::SAMPLED,
                 // tiling: ImageTiling::Optimal,
                 ..Default::default()
             },
@@ -210,11 +223,20 @@ impl Camera {
         .unwrap();
         self.depth_view = ImageView::new_default(depth_image.clone()).unwrap();
         self.depth_image = depth_image;
+
+        self.create_hiz(gpu, dimensions);
+        self.uniform_hi_z_info = gpu.buffer_from_data(
+            &crate::renderer::cs::HiZInfo {
+                screenResolution: [dimensions[0] as i32, dimensions[1] as i32],
+                // mip_levels: 0,
+                // _pad: [0; 3],
+            },
+            BufferUsage::UNIFORM_BUFFER,
+        );
     }
     pub fn get_view_matrix(&self) -> glam::Mat4 {
-
         let forward = self.rot * Vec3::Z;
-		glam::Mat4::look_at_lh(self.pos, self.pos + forward, self.rot * Vec3::Y)
+        glam::Mat4::look_at_lh(self.pos, self.pos + forward, self.rot * Vec3::Y)
     }
     pub fn get_proj_matrix(&self, aspect: f32) -> glam::Mat4 {
         glam::Mat4::perspective_lh(std::f32::consts::FRAC_PI_2, aspect, self.near, self.far)
@@ -225,7 +247,10 @@ impl Camera {
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         aspect: f32,
     ) {
-        let cam_data_buf = gpu.sub_alloc(BufferUsage::UNIFORM_BUFFER).allocate_sized().unwrap();
+        let cam_data_buf = gpu
+            .sub_alloc(BufferUsage::UNIFORM_BUFFER)
+            .allocate_sized()
+            .unwrap();
         {
             let mut cam_data = cam_data_buf.write().unwrap();
             *cam_data = crate::vs::camera {
@@ -236,6 +261,25 @@ impl Camera {
         builder
             .copy_buffer(CopyBufferInfo::buffers(cam_data_buf, self.uniform.clone()))
             .unwrap();
+
+        let hi_z_info_buf = gpu
+			.sub_alloc(BufferUsage::UNIFORM_BUFFER)
+			.allocate_sized()
+			.unwrap();
+		{
+			let mut hi_z_info = hi_z_info_buf.write().unwrap();
+			*hi_z_info = crate::renderer::cs::HiZInfo {
+				screenResolution: [
+					self.hiz_image.as_ref().unwrap().extent()[0] as i32,
+					self.hiz_image.as_ref().unwrap().extent()[1] as i32,
+				],
+				// mip_levels: self.hiz_mip_levels,
+				// _pad: [0; 3],
+			};
+		}
+		builder
+			.copy_buffer(CopyBufferInfo::buffers(hi_z_info_buf, self.uniform_hi_z_info.clone()))
+			.unwrap();
     }
     pub fn translate(&mut self, v: Vec3) {
         self.pos += self.rot * v;

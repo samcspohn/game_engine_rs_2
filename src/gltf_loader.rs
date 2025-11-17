@@ -9,7 +9,7 @@ use crate::{
     asset_manager::{Asset, DeferredAssetQueue},
     component::Scene,
     engine::Engine,
-    obj_loader::{MESH_BUFFERS, Mesh, Model, pack_tangent, pack_normal},
+    obj_loader::{self, MESH_BUFFERS, Mesh, Model, pack_normal, pack_tangent},
     renderer::_RendererComponent,
     texture::Texture,
     transform::{_Transform, Transform},
@@ -293,6 +293,31 @@ fn recursive_access_node(
                     }
                 }
             }
+            _mesh.aabb.min = primitive.bounding_box().min.into();
+            _mesh.aabb.max = primitive.bounding_box().max.into();
+
+           // _mesh.aabb = obj_loader::AABB {
+           //      min: [
+           //          _mesh.vertices.iter().map(|v| v[0]).fold(f32::INFINITY, f32::min),
+           //          _mesh.vertices.iter().map(|v| v[1]).fold(f32::INFINITY, f32::min),
+           //          _mesh.vertices.iter().map(|v| v[2]).fold(f32::INFINITY, f32::min),
+           //      ],
+           //      max: [
+           //          _mesh.vertices
+           //              .iter()
+           //              .map(|v| v[0])
+           //              .fold(f32::NEG_INFINITY, f32::max),
+           //          _mesh.vertices
+           //              .iter()
+           //              .map(|v| v[1])
+           //              .fold(f32::NEG_INFINITY, f32::max),
+           //          _mesh.vertices
+           //              .iter()
+           //              .map(|v| v[2])
+           //              .fold(f32::NEG_INFINITY, f32::max),
+           //      ],
+           //  };
+
             meshes.push(_mesh);
         }
         let name_path = format!("{}.{}", file_path, mesh.name().unwrap_or_default(),);

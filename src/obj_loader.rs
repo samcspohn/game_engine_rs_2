@@ -107,8 +107,8 @@ impl MeshBuffers {
             self.normal_buffer.push_data(*n);
         }
         for t in tangents {
-			self.tangent_buffer.push_data(*t);
-		}
+            self.tangent_buffer.push_data(*t);
+        }
         for t in tex_coords {
             self.tex_coord_buffer.push_data(*t);
         }
@@ -154,6 +154,12 @@ impl Debug for Material {
 }
 
 #[derive(Debug, Clone)]
+pub struct AABB {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+#[derive(Debug, Clone)]
 pub struct Mesh {
     pub vertices: Vec<[f32; 3]>,
     pub normals: Vec<u32>,
@@ -173,6 +179,8 @@ pub struct Mesh {
     // global offsets for indirect drawing
     pub vertex_offset: u32,
     pub index_offset: u32,
+
+    pub aabb: AABB,
 }
 
 impl Asset for Model {
@@ -234,37 +242,28 @@ impl Asset for Model {
 
             let mut tangents_f32 = vec![[1.0, 0.0, 0.0, 1.0]; vertices.len()];
             for face in mesh.indices.chunks(3) {
-				let v0 = vertices[face[0] as usize];
-				let v1 = vertices[face[1] as usize];
-				let v2 = vertices[face[2] as usize];
+                let v0 = vertices[face[0] as usize];
+                let v1 = vertices[face[1] as usize];
+                let v2 = vertices[face[2] as usize];
 
-				let edge1 = [
-					v1[0] - v0[0],
-					v1[1] - v0[1],
-					v1[2] - v0[2],
-				];
-				let edge2 = [
-					v2[0] - v0[0],
-					v2[1] - v0[1],
-					v2[2] - v0[2],
-				];
+                let edge1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
+                let edge2 = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
 
-				let tangent = [
-					edge1[0] + edge2[0],
-					edge1[1] + edge2[1],
-					edge1[2] + edge2[2],
-					1.0,
-				];
-				for &idx in face {
-					tangents_f32[idx as usize] = tangent;
-				}
-			}
+                let tangent = [
+                    edge1[0] + edge2[0],
+                    edge1[1] + edge2[1],
+                    edge1[2] + edge2[2],
+                    1.0,
+                ];
+                for &idx in face {
+                    tangents_f32[idx as usize] = tangent;
+                }
+            }
 
             // Convert f32 tangents to packed u32 format
             for tangent in tangents_f32 {
                 tangents.push(pack_tangent(tangent));
             }
-
 
             // Process texture coordinates
             if !mesh.texcoords.is_empty() {
@@ -301,7 +300,14 @@ impl Asset for Model {
             }
             let (vertex_offset, index_offset) = if let Some(buffers) = MESH_BUFFERS.lock().as_mut()
             {
-                buffers.add_mesh(&vertices, &normals, &tangents, &tex_coords, &colors, &indices)
+                buffers.add_mesh(
+                    &vertices,
+                    &normals,
+                    &tangents,
+                    &tex_coords,
+                    &colors,
+                    &indices,
+                )
             } else {
                 panic!("MESH_BUFFERS not initialized");
             };
@@ -351,8 +357,8 @@ impl Asset for Model {
                         base_color = [diffuse_color[0], diffuse_color[1], diffuse_color[2], 1.0];
                     }
                     if let Some(disolve) = material.dissolve {
-						base_color[3] = disolve;
-					}
+                        base_color[3] = disolve;
+                    }
                     if let Some(diffuse_texture) = material.diffuse_texture.clone() {
                         println!("Loading diffuse texture for mesh: {:?}", diffuse_texture);
                         let tex_path = if Path::new(&diffuse_texture).is_absolute() {
@@ -411,12 +417,34 @@ impl Asset for Model {
                 }
             }
             let material = Material {
-				base_color,
-				albedo_texture,
-				normal_texture: _normal_texture,
-				specular_texture: _specular_texture,
-				metallic_roughness_texture: None,
-			};
+                base_color,
+                albedo_texture,
+                normal_texture: _normal_texture,
+                specular_texture: _specular_texture,
+                metallic_roughness_texture: None,
+            };
+
+            let aabb = AABB {
+                min: [
+                    vertices.iter().map(|v| v[0]).fold(f32::INFINITY, f32::min),
+                    vertices.iter().map(|v| v[1]).fold(f32::INFINITY, f32::min),
+                    vertices.iter().map(|v| v[2]).fold(f32::INFINITY, f32::min),
+                ],
+                max: [
+                    vertices
+                        .iter()
+                        .map(|v| v[0])
+                        .fold(f32::NEG_INFINITY, f32::max),
+                    vertices
+                        .iter()
+                        .map(|v| v[1])
+                        .fold(f32::NEG_INFINITY, f32::max),
+                    vertices
+                        .iter()
+                        .map(|v| v[2])
+                        .fold(f32::NEG_INFINITY, f32::max),
+                ],
+            };
 
             let mesh = Mesh {
                 vertices,
@@ -428,6 +456,7 @@ impl Asset for Model {
                 vertex_offset,
                 index_offset,
                 material: Some(material),
+                aabb,
                 // texture,
                 // vertex_buffer,
                 // normal_buffer,
@@ -486,9 +515,20 @@ impl Model {
         // let index_buffer = gpu.buffer_from_iter(indices.iter().cloned(), BufferUsage::INDEX_BUFFER);
 
         let (vertex_offset, index_offset) = if let Some(buffers) = MESH_BUFFERS.lock().as_mut() {
-            buffers.add_mesh(&vertices, &normals, &tangents, &tex_coords, &colors, &indices)
+            buffers.add_mesh(
+                &vertices,
+                &normals,
+                &tangents,
+                &tex_coords,
+                &colors,
+                &indices,
+            )
         } else {
             panic!("MESH_BUFFERS not initialized");
+        };
+        let aabb = AABB {
+            min: [-0.5, -0.5, 0.0],
+            max: [0.5, 0.5, 0.0],
         };
         let mesh = Mesh {
             vertices,
@@ -499,6 +539,7 @@ impl Model {
             indices,
             vertex_offset,
             index_offset,
+            aabb,
             // vertex_buffer,
             // normal_buffer,
             // tex_coord_buffer,
@@ -523,6 +564,10 @@ impl Mesh {
             index_offset: 0,
             // texture: None,
             material: None,
+            aabb: AABB {
+				min: [0.0, 0.0, 0.0],
+				max: [0.0, 0.0, 0.0],
+			},
         }
     }
 }

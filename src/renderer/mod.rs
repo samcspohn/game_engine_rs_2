@@ -18,6 +18,7 @@ use vulkano::{
     descriptor_set::{DescriptorSet, WriteDescriptorSet},
     image::{Image, sampler::Sampler, view::ImageView},
     memory::allocator::MemoryTypeFilter,
+    padded::Padded,
     pipeline::{
         ComputePipeline, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
         PipelineShaderStageCreateInfo, compute::ComputePipelineCreateInfo,
@@ -37,7 +38,7 @@ use crate::{
     util::Storage,
 };
 
-mod cs {
+pub(crate) mod cs {
     vulkano_shaders::shader! {
         ty: "compute",
         path: "shaders/renderer.comp",
@@ -64,8 +65,10 @@ pub struct RenderingSystem {
     pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
     hiz_sampler: Arc<vulkano::image::sampler::Sampler>,
     dummy_hiz_view: Arc<ImageView>,
+    occlusion_culling: occlusion_culling::HiZGenerator,
     // buffers
     indirect_commands_buffer: GpuVec<DrawIndexedIndirectCommand>,
+    aabbs_buffer: GpuVec<cs::AABB>,
     // indirect_texture_vec: GpuVec<u32>, // texture per indirect draw command -> change to material per indirect draw command
     indirect_material_vec: GpuVec<u32>, // material per indirect draw command
     material_vec: GpuVec<crate::fs::Material>,
@@ -198,7 +201,8 @@ impl RenderingSystem {
                 format: vulkano::format::Format::R32_SFLOAT,
                 extent: [1, 1, 1],
                 mip_levels: 1,
-                usage: vulkano::image::ImageUsage::SAMPLED | vulkano::image::ImageUsage::TRANSFER_DST,
+                usage: vulkano::image::ImageUsage::SAMPLED
+                    | vulkano::image::ImageUsage::TRANSFER_DST,
                 ..Default::default()
             },
             vulkano::memory::allocator::AllocationCreateInfo {
@@ -209,9 +213,12 @@ impl RenderingSystem {
         .unwrap();
         let dummy_hiz_view = ImageView::new_default(dummy_hiz_image).unwrap();
 
+        let occlusion_culling = occlusion_culling::HiZGenerator::new(&gpu);
+
         Self {
             command_buffer: None,
             pipeline,
+            occlusion_culling,
             hiz_sampler,
             dummy_hiz_view,
             indirect_commands_buffer: GpuVec::new(
@@ -226,6 +233,7 @@ impl RenderingSystem {
             // ),
             indirect_material_vec: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
             material_vec: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
+            aabbs_buffer: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
             // material_vec: Vec::new(),
             texture_map: HashMap::new(),
             registered_textures: Vec::new(),
@@ -311,7 +319,8 @@ impl RenderingSystem {
             mc.num_mesh = mesh_count;
             self.mvp_count
                 .fetch_add(mesh_count * mc.count, Ordering::SeqCst);
-        });
+        }).unwrap();
+        self.mvp_count.store(1 << 20, Ordering::SeqCst); // hack to force resize next frame
 
         let indirect_offset = self.indirect_commands_buffer.data_len() as u32;
         for mesh in &asset.meshes {
@@ -341,6 +350,10 @@ impl RenderingSystem {
             } else {
                 self.indirect_material_vec.push_data(u32::MAX);
             }
+            self.aabbs_buffer.push_data(cs::AABB {
+                min: [mesh.aabb.min[0], mesh.aabb.min[1], mesh.aabb.min[2], 0.0],
+                max: [mesh.aabb.max[0], mesh.aabb.max[1], mesh.aabb.max[2], 0.0],
+            });
             // self.indirect_texture_vec.push_data(*tex_idx);
         }
         *self
@@ -464,6 +477,7 @@ impl RenderingSystem {
                     WriteDescriptorSet::buffer(6, self.workgroup_sums_buffer.buf()),
                     WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.buf()),
                     WriteDescriptorSet::buffer(8, self.indirect_material_vec.buf()),
+                    WriteDescriptorSet::buffer(9, self.gpu.empty.clone()),
                     // WriteDescriptorSet::buffer(9, normal_matrices.clone()),
                 ],
                 [],
@@ -474,7 +488,15 @@ impl RenderingSystem {
             let set1 = DescriptorSet::new(
                 self.gpu.desc_alloc.clone(),
                 layout1.clone(),
-                [WriteDescriptorSet::buffer(1, self.gpu.empty.clone())],
+                [
+                    WriteDescriptorSet::image_view_sampler(
+                        0,
+                        self.dummy_hiz_view.clone(),
+                        self.hiz_sampler.clone(),
+                    ),
+                    WriteDescriptorSet::buffer(1, self.gpu.empty.clone()),
+                    WriteDescriptorSet::buffer(2, self.gpu.empty.clone()),
+                ],
                 [],
             )
             .unwrap();
@@ -585,6 +607,7 @@ impl RenderingSystem {
                 WriteDescriptorSet::buffer(6, self.gpu.empty.clone()),
                 WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.buf()),
                 WriteDescriptorSet::buffer(8, self.indirect_material_vec.buf()),
+                WriteDescriptorSet::buffer(9, self.aabbs_buffer.buf()),
             ],
             [],
         )
@@ -597,8 +620,13 @@ impl RenderingSystem {
                 self.gpu.desc_alloc.clone(),
                 layout1.clone(),
                 [
-                    // WriteDescriptorSet::image_view_sampler(0, hiz_view.clone(), self.hiz_sampler.clone()),
+                    WriteDescriptorSet::image_view_sampler(
+                        0,
+                        hiz_view.clone(),
+                        self.hiz_sampler.clone(),
+                    ),
                     WriteDescriptorSet::buffer(1, cam),
+                    WriteDescriptorSet::buffer(2, camera.uniform_hi_z_info.clone()),
                 ],
                 [],
             )
@@ -609,8 +637,13 @@ impl RenderingSystem {
                 self.gpu.desc_alloc.clone(),
                 layout1.clone(),
                 [
-                    // WriteDescriptorSet::image_view_sampler(0, self.dummy_hiz_view.clone(), self.hiz_sampler.clone()),
+                    WriteDescriptorSet::image_view_sampler(
+                        0,
+                        self.dummy_hiz_view.clone(),
+                        self.hiz_sampler.clone(),
+                    ),
                     WriteDescriptorSet::buffer(1, cam),
+                    WriteDescriptorSet::buffer(2, camera.uniform_hi_z_info.clone()),
                 ],
                 [],
             )
@@ -643,6 +676,17 @@ impl RenderingSystem {
                     .unwrap();
             }
         }
+    }
+
+    /// Generate Hi-Z buffer from the current frame's depth buffer
+    /// This should be called AFTER rendering completes so the Hi-Z is ready for next frame
+    /// Note: Assumes depth buffer has already been blitted to Hi-Z mip 0
+    pub fn generate_hiz(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        camera: &crate::camera::Camera,
+    ) {
+        self.occlusion_culling.generate_hiz(&self.gpu, builder, camera);
     }
 
     // assume pipeline already bound
@@ -688,7 +732,7 @@ impl RenderingSystem {
             textures.push((tex.image.clone(), tex.sampler.clone()));
         }
         if self.material_vec.data_len() > 0 {
-        	println!("material 0: {:?}", self.material_vec.get_data(0).unwrap())
+            println!("material 0: {:?}", self.material_vec.get_data(0).unwrap())
         }
 
         let set = DescriptorSet::new_variable(

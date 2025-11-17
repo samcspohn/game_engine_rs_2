@@ -31,6 +31,11 @@ struct MatrixData {
     mat4 mvp;
 };
 
+struct AABB {
+    vec4 min;
+    vec4 max;
+};
+
 // layout(set = 1, binding = 5) buffer DirtyL2 { uint dirty_l2[]; };
 layout(set = 0, binding = 0) buffer MatrixBuffer {
     MatrixData m[];
@@ -67,6 +72,9 @@ layout(set = 0, binding = 7) buffer IndirectCommands {
 layout(set = 0, binding = 8) buffer MaterialIds {
     uint material_ids[];
 };
+layout(set = 0, binding = 9) buffer AABBs {
+    AABB aabbs[];
+};
 
 // Hi-Z buffer for occlusion culling (optional - may be dummy texture if not initialized)
 layout(set = 1, binding = 0) uniform sampler2D hizBuffer;
@@ -76,6 +84,12 @@ layout(set = 1, binding = 1) uniform camera {
     mat4 proj;
 }
 cam;
+
+layout(set = 1, binding = 2) uniform HiZInfo {
+    ivec2 screenResolution;
+    // uint mipLevels;
+    // float padding;
+} hizInfo;
 
 layout(set = 2, binding = 0) uniform Stage {
     uint num_jobs;
@@ -87,11 +101,131 @@ void pass0_localScan();
 void pass1_globalScan();
 void pass2_addGlobal();
 
+// Check if Hi-Z is available and valid
+bool isHiZAvailable() {
+    // Check if screen resolution is valid
+    if (hizInfo.screenResolution.x <= 0 || hizInfo.screenResolution.y <= 0) {
+        return false;
+    }
+    // Check if Hi-Z has mip levels
+    if (textureQueryLevels(hizBuffer) <= 0) {
+        return false;
+    }
+    return true;
+}
+
+// Occlusion test function
+bool isOccluded(uint meshId, uint transformId) {
+    // Safety check: if Hi-Z not available, don't cull anything
+    if (!isHiZAvailable()) {
+        return false;
+    }
+
+    // Bounds check for AABB array
+    if (meshId >= aabbs.length()) {
+        return false; // Don't cull if we don't have AABB data
+    }
+    AABB bbox = aabbs[meshId];
+    mat4 modelMatrix = m[transformId].model;
+    mat4 viewProj = cam.proj * cam.view;
+
+    // 1. Generate and transform 8 corners
+    vec3 corners[8];
+    corners[0] = vec3(bbox.min.x, bbox.min.y, bbox.min.z);
+    corners[1] = vec3(bbox.max.x, bbox.min.y, bbox.min.z);
+    corners[2] = vec3(bbox.min.x, bbox.max.y, bbox.min.z);
+    corners[3] = vec3(bbox.max.x, bbox.max.y, bbox.min.z);
+    corners[4] = vec3(bbox.min.x, bbox.min.y, bbox.max.z);
+    corners[5] = vec3(bbox.max.x, bbox.min.y, bbox.max.z);
+    corners[6] = vec3(bbox.min.x, bbox.max.y, bbox.max.z);
+    corners[7] = vec3(bbox.max.x, bbox.max.y, bbox.max.z);
+
+    // 2. Project to screen space and find bounds
+    vec2 screenMin = vec2(1e10);
+    vec2 screenMax = vec2(-1e10);
+    float minDepth = 1.0;
+    bool anyInFront = false;
+
+    for (int i = 0; i < 8; ++i) {
+        vec4 worldPos = modelMatrix * vec4(corners[i], 1.0);
+        vec4 clipPos = viewProj * worldPos;
+
+        if (clipPos.w > 0.0) {
+            anyInFront = true;
+            vec3 ndc = clipPos.xyz / clipPos.w;
+            vec2 screenPos = ndc.xy * 0.5 + 0.5;
+
+            screenMin = min(screenMin, screenPos);
+            screenMax = max(screenMax, screenPos);
+            minDepth = min(minDepth, ndc.z);
+        }
+    }
+
+    // All corners behind camera
+    if (!anyInFront) {
+        return true; // Cull it
+    }
+
+    // Clamp to screen
+    screenMin = clamp(screenMin, vec2(0.0), vec2(1.0));
+    screenMax = clamp(screenMax, vec2(0.0), vec2(1.0));
+
+    // 3. Select mip level
+    vec2 screenSize = (screenMax - screenMin) * vec2(hizInfo.screenResolution);
+    float maxDim = max(screenSize.x, screenSize.y);
+
+    // Handle edge case where object is very small or offscreen
+    if (maxDim < 1.0) {
+        maxDim = 1.0;
+    }
+
+    // If object covers no pixels, it's effectively culled
+    if (maxDim <= 0.0) {
+        return true;
+    }
+
+    int numMips = textureQueryLevels(hizBuffer);
+    float mipLevel = clamp(ceil(log2(maxDim)), 0.0, float(numMips - 1));
+
+    // 4. Sample Hi-Z (conservative: check 4 corners)
+    // Hi-Z stores MAX (furthest) depth per region
+    // We take MIN of samples to get the closest occluder among the 4 corners
+    float d0 = textureLod(hizBuffer, screenMin, mipLevel).r;
+    float d1 = textureLod(hizBuffer, vec2(screenMax.x, screenMin.y), mipLevel).r;
+    float d2 = textureLod(hizBuffer, vec2(screenMin.x, screenMax.y), mipLevel).r;
+    float d3 = textureLod(hizBuffer, screenMax, mipLevel).r;
+    float occluderDepth = min(min(d0, d1), min(d2, d3));
+
+    // 5. Compare depths
+    const float bias = 0.001;
+
+    // Additional safety: if occluder depth is 0.0 (near plane), don't cull
+    // This handles the case where Hi-Z might not be properly initialized
+    if (occluderDepth <= 0.0001) {
+        return false;
+    }
+
+    return (minDepth > occluderDepth + bias);
+}
+
 // case 0: apply updates
 // case 1: reset instance counts
 // case 2: count renderers
 // case 3: prefix sum first instance
 // case 4: write indirect commands
+
+float closeness(uint meshId, uint transformId) {
+    mat4 modelMatrix = m[transformId].model;
+    AABB bbox = aabbs[meshId];
+    // vec4 center = (bbox.min + bbox.max) * 0.5;
+    vec4 center = vec4((bbox.min.xyz + bbox.max.xyz) * 0.5, 1.0);
+    vec4 worldPos = modelMatrix * center;
+    vec4 viewPos = cam.view * worldPos;
+    return length(viewPos.xyz);
+    // vec4 worldPos = modelMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+    // vec4 viewPos = cam.view * worldPos;
+    // return length(viewPos.xyz);
+}
 
 layout(local_size_x = 64) in;
 void main() {
@@ -136,7 +270,10 @@ void main() {
                 break;
             }
             for (uint i = 0; i < mc.count; ++i) {
-                // atomicAdd(indirect[mc.offset + i].instanceCount, 1); // no culling yet
+                // Occlusion test: only count visible meshes
+                if (isOccluded(mc.offset + i, r.t_idx)) {
+                    // continue;
+                }
                 atomicAdd(indirect[mc.offset + i].firstInstance, 1);
             }
             // atomicAdd(indirect[r.m_id].firstInstance, 1);
@@ -192,6 +329,12 @@ void main() {
                     m[r.t_idx].mvp = cam.proj * cam.view * model_matrix;
                     // mat3 normal = inverse(transpose(mat3(model_matrix)));
                     for (uint i = 0; i < mc.count; ++i) {
+                        if (isOccluded(mc.offset + i, r.t_idx)) {
+                            // continue;
+                        }
+                        // if (closeness(mc.offset + i, r.t_idx) > 10.0) {
+                        //     continue;
+                        // }
                         uint mvp_idx = indirect[mc.offset + i].firstInstance +
                                 atomicAdd(indirect[mc.offset + i].instanceCount, 1);
                         transform_ids[mvp_idx].t_id = r.t_idx;

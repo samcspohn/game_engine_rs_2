@@ -99,7 +99,7 @@ const MAX_FRAMES_IN_FLIGHT: u32 = 4;
 // 1 << 21 = 2,097,152
 // 1 << 22 = 4,194,304
 // 1 << 23 = 8,388,608
-const BIT_SHIFT: u32 = 20;
+const BIT_SHIFT: u32 = 0;
 const ADD: usize = 0;
 const NUM_CUBES: usize = (1 << BIT_SHIFT) + ADD;
 struct FPS {
@@ -247,15 +247,15 @@ impl App {
             // );
             // bismarck_handle = Some(a);
 
-            // let _b52_entity_arc = b52_entity_arc.clone();
-            // let a = asset_manager.load_asset::<Scene>(
-            //     "/home/sspohn/Documents/b52.1-4.glb",
-            //     Some(Box::new(move |handle, arc_asset| {
-            //         // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
-            //         *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
-            //     })),
-            // );
-            // b52_handle = Some(a);
+            let _b52_entity_arc = b52_entity_arc.clone();
+            let a = asset_manager.load_asset::<Scene>(
+                "/home/sspohn/Documents/b52.1-4.glb",
+                Some(Box::new(move |handle, arc_asset| {
+                    // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
+                    *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
+                })),
+            );
+            b52_handle = Some(a);
 
             let dims = (NUM_CUBES as f64).powf(1.0 / 3.0).ceil() as u32;
 
@@ -442,8 +442,8 @@ impl ApplicationHandler for App {
         let camera = Arc::new(Mutex::new(Camera::new(
             &self.gpu,
             [800, 600],
-            0.01,
-            10_000.0,
+            1.0,
+            100.0,
         )));
         let rcx = RenderContext::new(event_loop, &self.gpu, camera.clone());
         let window_id = rcx.window.id();
@@ -725,7 +725,7 @@ impl ApplicationHandler for App {
         self.update_sim.stop();
         // // test performance of non-reuse of command buffers
         // self.transform_compute.command_buffer = Vec::new();
-        // self.rendering_system.command_buffer = None;
+        // self.rendering_system.lock().command_buffer = None;
         // for (_window_id, rcx) in self.rcxs.iter_mut() {
         //     rcx.command_buffer = None;
         // }
@@ -895,8 +895,8 @@ impl ApplicationHandler for App {
             let camera = Arc::new(Mutex::new(Camera::new(
                 &self.gpu,
                 [800, 600],
-                0.01,
-                10_000.0,
+                1.0,
+                100.0,
             )));
             let rcx = RenderContext::new(_event_loop, &self.gpu, camera.clone());
             let window_id = rcx.window.id();

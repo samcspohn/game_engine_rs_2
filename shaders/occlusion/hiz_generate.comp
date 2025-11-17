@@ -1,122 +1,126 @@
 #version 450
 
 // Hi-Z Generator using shared memory reduction
-// Processes multiple mip levels in a single dispatch for efficiency
-// Each workgroup generates up to 4 mip levels from a 16x16 tile
+// Generates mip levels 1-4 from source mip level 0
+// Each workgroup processes a 32x32 region of the source to generate a 16x16 output for mip 1
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
-// Input: depth buffer (sampled texture)
-layout(set = 0, binding = 0) uniform sampler2D srcDepth;
+// Input: source mip level (sampled texture)
+layout(set = 0, binding = 0) uniform sampler2D srcMip;
 
-// Output: multiple mip levels as storage images
-layout(set = 0, binding = 1, r32f) writeonly uniform image2D dstMip0;
-layout(set = 0, binding = 2, r32f) writeonly uniform image2D dstMip1;
-layout(set = 0, binding = 3, r32f) writeonly uniform image2D dstMip2;
-layout(set = 0, binding = 4, r32f) writeonly uniform image2D dstMip3;
+// Output: multiple mip levels as storage images (these are mip N+1, N+2, N+3, N+4 relative to src)
+layout(set = 0, binding = 1, r32f) writeonly uniform image2D dstMip0; // mip N+1
+layout(set = 0, binding = 2, r32f) writeonly uniform image2D dstMip1; // mip N+2
+layout(set = 0, binding = 3, r32f) writeonly uniform image2D dstMip2; // mip N+3
+layout(set = 0, binding = 4, r32f) writeonly uniform image2D dstMip3; // mip N+4
 
 layout(push_constant) uniform PushConstants {
-    uvec2 srcResolution; // Resolution of source depth buffer
+    uvec2 srcResolution; // Resolution of source mip level
     uint numMips; // Number of mips to generate (1-4)
 } pc;
 
-// Shared memory for reduction
-// 16x16 for mip 0, used progressively smaller for higher mips
+// Shared memory for reduction - stores 16x16 region for progressive downsampling
 shared float sharedDepth[16][16];
 
 void main() {
-    uvec2 globalCoord = gl_GlobalInvocationID.xy;
     uvec2 localCoord = gl_LocalInvocationID.xy;
+    uvec2 workGroupId = gl_WorkGroupID.xy;
 
-    // Load depth from source into shared memory
-    float depth = 1.0; // Far plane default
-    if (globalCoord.x < pc.srcResolution.x && globalCoord.y < pc.srcResolution.y) {
-        depth = texelFetch(srcDepth, ivec2(globalCoord), 0).r;
+    // === MIP LEVEL 0 (N+1) ===
+    // Each thread samples a 2x2 region from source and takes MIN
+    // This generates the first output mip level from the source texture
+
+    uvec2 srcCoord = workGroupId * 32 + localCoord * 2;
+
+    float maxDepth = 0.0; // Near plane (will be updated to furthest/MAX)
+
+    // Sample 2x2 region from source texture
+    if (srcCoord.x < pc.srcResolution.x && srcCoord.y < pc.srcResolution.y) {
+        float d00 = texelFetch(srcMip, ivec2(srcCoord.x, srcCoord.y), 0).r;
+        float d10 = texelFetch(srcMip, ivec2(min(srcCoord.x + 1, pc.srcResolution.x - 1), srcCoord.y), 0).r;
+        float d01 = texelFetch(srcMip, ivec2(srcCoord.x, min(srcCoord.y + 1, pc.srcResolution.y - 1)), 0).r;
+        float d11 = texelFetch(srcMip, ivec2(min(srcCoord.x + 1, pc.srcResolution.x - 1), min(srcCoord.y + 1, pc.srcResolution.y - 1)), 0).r;
+
+        // Take MAX for conservative occlusion (MAX = furthest depth, since far plane = 1.0)
+        maxDepth = max(max(d00, d10), max(d01, d11));
+    } else {
+        maxDepth = 1.0; // Far plane for out of bounds
     }
-    sharedDepth[localCoord.y][localCoord.x] = depth;
 
-    barrier();
+    // Store in shared memory for further reduction
+    sharedDepth[localCoord.y][localCoord.x] = maxDepth;
 
-    // === MIP LEVEL 0 ===
-    // Write directly from shared memory
+    // Write first output mip (mip N+1)
     if (pc.numMips >= 1) {
-        if (globalCoord.x < pc.srcResolution.x && globalCoord.y < pc.srcResolution.y) {
-            imageStore(dstMip0, ivec2(globalCoord), vec4(depth));
+        uvec2 dstCoord = workGroupId * 16 + localCoord;
+        uvec2 dstSize = (pc.srcResolution + 1) / 2;
+        if (dstCoord.x < dstSize.x && dstCoord.y < dstSize.y) {
+            imageStore(dstMip0, ivec2(dstCoord), vec4(maxDepth));
         }
     }
 
     barrier();
 
-    // === MIP LEVEL 1 ===
-    // Reduce 2x2 -> 1 using MIN
+    // === MIP LEVEL 1 (N+2) ===
+    // Reduce 2x2 from shared memory -> 1
     if (pc.numMips >= 2) {
         if (localCoord.x % 2 == 0 && localCoord.y % 2 == 0) {
-            // Sample 2x2 region from shared memory
             float d00 = sharedDepth[localCoord.y][localCoord.x];
-            float d10 = sharedDepth[localCoord.y][localCoord.x + 1];
-            float d01 = sharedDepth[localCoord.y + 1][localCoord.x];
-            float d11 = sharedDepth[localCoord.y + 1][localCoord.x + 1];
+            float d10 = sharedDepth[localCoord.y][min(localCoord.x + 1, 15)];
+            float d01 = sharedDepth[min(localCoord.y + 1, 15)][localCoord.x];
+            float d11 = sharedDepth[min(localCoord.y + 1, 15)][min(localCoord.x + 1, 15)];
 
-            // Take minimum (furthest depth for conservative occlusion)
-            float minDepth = min(min(d00, d10), min(d01, d11));
+            maxDepth = max(max(d00, d10), max(d01, d11));
+            sharedDepth[localCoord.y][localCoord.x] = maxDepth;
 
-            // Store back to shared memory for next level
-            sharedDepth[localCoord.y][localCoord.x] = minDepth;
-
-            // Write to mip 1
-            uvec2 mip1Coord = globalCoord / 2;
-            uvec2 mip1Size = (pc.srcResolution + 1) / 2;
-            if (mip1Coord.x < mip1Size.x && mip1Coord.y < mip1Size.y) {
-                imageStore(dstMip1, ivec2(mip1Coord), vec4(minDepth));
+            uvec2 dstCoord = workGroupId * 8 + localCoord / 2;
+            uvec2 dstSize = (pc.srcResolution + 3) / 4;
+            if (dstCoord.x < dstSize.x && dstCoord.y < dstSize.y) {
+                imageStore(dstMip1, ivec2(dstCoord), vec4(maxDepth));
             }
         }
     }
 
     barrier();
 
-    // === MIP LEVEL 2 ===
-    // Reduce 4x4 -> 1 (or 2x2 from mip1)
+    // === MIP LEVEL 2 (N+3) ===
+    // Reduce 4x4 from original -> 1 (2x2 from mip1)
     if (pc.numMips >= 3) {
         if (localCoord.x % 4 == 0 && localCoord.y % 4 == 0) {
-            // Sample 2x2 region from mip 1 data in shared memory
             float d00 = sharedDepth[localCoord.y][localCoord.x];
-            float d10 = sharedDepth[localCoord.y][localCoord.x + 2];
-            float d01 = sharedDepth[localCoord.y + 2][localCoord.x];
-            float d11 = sharedDepth[localCoord.y + 2][localCoord.x + 2];
+            float d10 = sharedDepth[localCoord.y][min(localCoord.x + 2, 15)];
+            float d01 = sharedDepth[min(localCoord.y + 2, 15)][localCoord.x];
+            float d11 = sharedDepth[min(localCoord.y + 2, 15)][min(localCoord.x + 2, 15)];
 
-            float minDepth = min(min(d00, d10), min(d01, d11));
+            maxDepth = max(max(d00, d10), max(d01, d11));
+            sharedDepth[localCoord.y][localCoord.x] = maxDepth;
 
-            // Store back to shared memory
-            sharedDepth[localCoord.y][localCoord.x] = minDepth;
-
-            // Write to mip 2
-            uvec2 mip2Coord = globalCoord / 4;
-            uvec2 mip2Size = (pc.srcResolution + 3) / 4;
-            if (mip2Coord.x < mip2Size.x && mip2Coord.y < mip2Size.y) {
-                imageStore(dstMip2, ivec2(mip2Coord), vec4(minDepth));
+            uvec2 dstCoord = workGroupId * 4 + localCoord / 4;
+            uvec2 dstSize = (pc.srcResolution + 7) / 8;
+            if (dstCoord.x < dstSize.x && dstCoord.y < dstSize.y) {
+                imageStore(dstMip2, ivec2(dstCoord), vec4(maxDepth));
             }
         }
     }
 
     barrier();
 
-    // === MIP LEVEL 3 ===
-    // Reduce 8x8 -> 1 (or 2x2 from mip2)
+    // === MIP LEVEL 3 (N+4) ===
+    // Reduce 8x8 from original -> 1 (2x2 from mip2)
     if (pc.numMips >= 4) {
         if (localCoord.x % 8 == 0 && localCoord.y % 8 == 0) {
-            // Sample 2x2 region from mip 2 data in shared memory
             float d00 = sharedDepth[localCoord.y][localCoord.x];
-            float d10 = sharedDepth[localCoord.y][localCoord.x + 4];
-            float d01 = sharedDepth[localCoord.y + 4][localCoord.x];
-            float d11 = sharedDepth[localCoord.y + 4][localCoord.x + 4];
+            float d10 = sharedDepth[localCoord.y][min(localCoord.x + 4, 15)];
+            float d01 = sharedDepth[min(localCoord.y + 4, 15)][localCoord.x];
+            float d11 = sharedDepth[min(localCoord.y + 4, 15)][min(localCoord.x + 4, 15)];
 
-            float minDepth = min(min(d00, d10), min(d01, d11));
+            maxDepth = max(max(d00, d10), max(d01, d11));
 
-            // Write to mip 3
-            uvec2 mip3Coord = globalCoord / 8;
-            uvec2 mip3Size = (pc.srcResolution + 7) / 8;
-            if (mip3Coord.x < mip3Size.x && mip3Coord.y < mip3Size.y) {
-                imageStore(dstMip3, ivec2(mip3Coord), vec4(minDepth));
+            uvec2 dstCoord = workGroupId * 2 + localCoord / 8;
+            uvec2 dstSize = (pc.srcResolution + 15) / 16;
+            if (dstCoord.x < dstSize.x && dstCoord.y < dstSize.y) {
+                imageStore(dstMip3, ivec2(dstCoord), vec4(maxDepth));
             }
         }
     }

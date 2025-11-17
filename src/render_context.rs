@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use vulkano::{
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
-        AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
+        AutoCommandBufferBuilder, BlitImageInfo, CommandBufferUsage, PrimaryAutoCommandBuffer,
         RenderingAttachmentInfo, RenderingInfo,
     },
     descriptor_set::{self, DescriptorSet, WriteDescriptorSet, layout::DescriptorBindingFlags},
@@ -317,7 +317,7 @@ impl RenderContext {
                 })],
                 depth_attachment: Some(RenderingAttachmentInfo {
                     load_op: AttachmentLoadOp::Clear,
-                    store_op: AttachmentStoreOp::DontCare,
+                    store_op: AttachmentStoreOp::Store,
                     clear_value: Some(1f32.into()),
                     ..RenderingAttachmentInfo::image_view(camera.depth_view.clone())
                 }),
@@ -337,6 +337,12 @@ impl RenderContext {
             matrix_data,
         );
         builder.end_rendering().unwrap();
+
+        // Generate Hi-Z AFTER rendering so it's ready for the next frame's occlusion culling
+        // Note: Vulkano handles synchronization automatically between rendering and compute
+        // This includes copying depth to Hi-Z mip 0, then generating the mip pyramid
+        rendering_system.generate_hiz(&mut builder, &camera);
+
         // We leave the render pass.
         self.command_buffer = Some(builder.build().unwrap());
     }

@@ -30,29 +30,29 @@ mod hiz_generate_cs {
 }
 
 /// Hi-Z (Hierarchical Z-Buffer) Generator for GPU occlusion culling
-/// 
+///
 /// Generates a mipmap pyramid from the depth buffer where each level contains
 /// the minimum depth values from the previous level. This allows fast occlusion
 /// queries at different scales.
-/// 
+///
 /// # Usage Example
-/// 
+///
 /// ```rust
 /// // In your rendering system initialization:
 /// let hiz_generator = HiZGenerator::new(&gpu);
-/// 
+///
 /// // In your camera setup:
 /// let mut camera = Camera::new(&gpu, [1920, 1080], 0.1, 1000.0);
 /// camera.create_hiz(&gpu, [1920, 1080]);
-/// 
+///
 /// // After rendering each frame, generate Hi-Z pyramid:
 /// hiz_generator.generate_hiz(&gpu, &mut command_builder, &camera);
-/// 
+///
 /// // Now the Hi-Z pyramid can be used for occlusion testing in the next frame
 /// ```
-/// 
+///
 /// # Implementation Details
-/// 
+///
 /// - Uses a two-step process:
 ///   1. Copy depth buffer (D32_SFLOAT) to Hi-Z mip 0 (R32_SFLOAT)
 ///   2. Generate mip levels 1-N using shared memory reduction (4 mips per pass)
@@ -66,7 +66,7 @@ pub struct HiZGenerator {
 
 impl HiZGenerator {
     /// Create a new Hi-Z generator
-    /// 
+    ///
     /// # Arguments
     /// * `gpu` - The GPU manager containing device and allocators
     pub fn new(gpu: &GPUManager) -> Self {
@@ -134,16 +134,16 @@ impl HiZGenerator {
     }
 
     /// Generate the complete Hi-Z pyramid from the camera's depth buffer
-    /// 
+    ///
     /// This should be called after rendering completes each frame. The resulting
     /// Hi-Z pyramid can then be used for occlusion culling in the next frame
     /// (one frame of latency is acceptable).
-    /// 
+    ///
     /// # Arguments
     /// * `gpu` - The GPU manager
     /// * `builder` - Command buffer builder for recording GPU commands
     /// * `camera` - Camera with initialized Hi-Z resources (call `create_hiz()` first)
-    /// 
+    ///
     /// # Panics
     /// Panics if the camera's Hi-Z image and views have not been initialized
     pub fn generate_hiz(
@@ -168,7 +168,7 @@ impl HiZGenerator {
 
         // Step 2: Generate remaining mips in batches of 4 using shared memory reduction
         let mut src_mip = 0u32;
-        
+
         while src_mip < mip_levels - 1 {
             let remaining_mips = mip_levels - src_mip - 1;
             let num_mips_this_pass = remaining_mips.min(4);
@@ -190,7 +190,7 @@ impl HiZGenerator {
     }
 
     /// Copy depth buffer (D32_SFLOAT) to Hi-Z mip 0 (R32_SFLOAT)
-    /// 
+    ///
     /// This performs format conversion since depth attachments use depth formats
     /// but compute shaders need color formats for read/write access.
     fn copy_depth_to_hiz_mip0(
@@ -244,7 +244,7 @@ impl HiZGenerator {
     }
 
     /// Generate a batch of mip levels (up to 4) using shared memory reduction
-    /// 
+    ///
     /// Each 16x16 workgroup can generate up to 4 mip levels in a single pass
     /// by progressively reducing data in shared memory. This is much more
     /// efficient than separate passes per mip level.
@@ -302,9 +302,9 @@ impl HiZGenerator {
             numMips: num_mips,
         };
 
-        // Each workgroup processes a 16x16 tile
-        let workgroups_x = (src_width + 15) / 16;
-        let workgroups_y = (src_height + 15) / 16;
+        // Each workgroup processes a 32x32 source tile (produces 16x16 output for mip N+1)
+        let workgroups_x = (src_width + 31) / 32;
+        let workgroups_y = (src_height + 31) / 32;
 
         unsafe {
             builder

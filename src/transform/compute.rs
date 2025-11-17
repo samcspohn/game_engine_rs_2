@@ -575,8 +575,8 @@ impl TransformCompute {
                         flags[idx * 3 + 0] = pos_flag;
                         flags[idx * 3 + 1] = rot_flag;
                         flags[idx * 3 + 2] = scl_flag;
-                        idx1 = work.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
+                    idx1 = work.0.fetch_add(chunk_size, std::sync::atomic::Ordering::SeqCst);
                 }
             });
 

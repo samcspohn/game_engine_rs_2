@@ -8,9 +8,7 @@ use vulkano::{
     command_buffer::{AutoCommandBufferBuilder, CopyBufferInfo, PrimaryAutoCommandBuffer},
     format::Format,
     image::{
-        Image, ImageAspects, ImageCreateInfo, ImageSubresourceRange, ImageTiling, ImageType,
-        ImageUsage,
-        view::{ImageView, ImageViewCreateInfo},
+        Image, ImageAspects, ImageCreateInfo, ImageSubresourceRange, ImageTiling, ImageType, ImageUsage, sampler::Sampler, view::{ImageView, ImageViewCreateInfo}
     },
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
 };
@@ -26,11 +24,13 @@ pub struct Camera {
     pub depth_image: Arc<Image>,
     pub depth_view: Arc<ImageView>,
     pub uniform: Subbuffer<crate::vs::camera>,
+    pub uniform_culling: Subbuffer<crate::vs::camera>,
     pub uniform_hi_z_info: Subbuffer<crate::renderer::cs::HiZInfo>,
     pub format: Format,
     pub hiz_image: Option<Arc<Image>>,
     pub hiz_views: Option<Vec<Arc<ImageView>>>,
     pub hiz_view_all_mips: Option<Arc<ImageView>>,
+    pub hiz_sampler: Option<Arc<Sampler>>,
     pub hiz_mip_levels: u32,
 }
 
@@ -84,7 +84,14 @@ impl Camera {
                 view: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
             },
-            BufferUsage::UNIFORM_BUFFER,
+            BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_SRC,
+        );
+        let uniform_culling = gpu.buffer_from_data(
+            &crate::vs::camera {
+                view: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            },
+            BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
         );
         let uniform_hi_z_info = gpu.buffer_from_data(
             &crate::renderer::cs::HiZInfo {
@@ -103,6 +110,7 @@ impl Camera {
             depth_image,
             depth_view,
             uniform,
+            uniform_culling,
             uniform_hi_z_info,
             format,
             near,
@@ -110,6 +118,7 @@ impl Camera {
             hiz_image: None,
             hiz_views: None,
             hiz_view_all_mips: None,
+            hiz_sampler: None,
             hiz_mip_levels: 0,
         };
         cam.create_hiz(gpu, dimensions);
@@ -173,13 +182,29 @@ impl Camera {
         )
         .unwrap();
 
+        let hiz_sampler = Sampler::new(
+			gpu.device.clone(),
+			vulkano::image::sampler::SamplerCreateInfo {
+				mag_filter: vulkano::image::sampler::Filter::Nearest,
+				min_filter: vulkano::image::sampler::Filter::Nearest,
+				mipmap_mode: vulkano::image::sampler::SamplerMipmapMode::Nearest,
+				lod: 0.0..=(hiz_mip_levels as f32),
+				..Default::default()
+			},
+		)
+		.unwrap();
+
         self.hiz_image = Some(hiz_image);
         self.hiz_views = Some(hiz_views);
         self.hiz_view_all_mips = Some(hiz_view_all_mips);
+        self.hiz_sampler = Some(hiz_sampler);
         self.hiz_mip_levels = hiz_mip_levels;
     }
 
     pub fn resize(&mut self, gpu: &GPUManager, dimensions: [u32; 2]) {
+        if dimensions == self.image.extent()[0..2] {
+            return;
+        }
         let image = Image::new(
             gpu.mem_alloc.clone(),
             ImageCreateInfo {
@@ -263,23 +288,40 @@ impl Camera {
             .unwrap();
 
         let hi_z_info_buf = gpu
-			.sub_alloc(BufferUsage::UNIFORM_BUFFER)
-			.allocate_sized()
-			.unwrap();
-		{
-			let mut hi_z_info = hi_z_info_buf.write().unwrap();
-			*hi_z_info = crate::renderer::cs::HiZInfo {
-				screenResolution: [
-					self.hiz_image.as_ref().unwrap().extent()[0] as i32,
-					self.hiz_image.as_ref().unwrap().extent()[1] as i32,
-				],
-				// mip_levels: self.hiz_mip_levels,
-				// _pad: [0; 3],
-			};
-		}
-		builder
-			.copy_buffer(CopyBufferInfo::buffers(hi_z_info_buf, self.uniform_hi_z_info.clone()))
-			.unwrap();
+            .sub_alloc(BufferUsage::UNIFORM_BUFFER)
+            .allocate_sized()
+            .unwrap();
+        {
+            let mut hi_z_info = hi_z_info_buf.write().unwrap();
+            *hi_z_info = crate::renderer::cs::HiZInfo {
+                screenResolution: [
+                    self.hiz_image.as_ref().unwrap().extent()[0] as i32,
+                    self.hiz_image.as_ref().unwrap().extent()[1] as i32,
+                ],
+                // mip_levels: self.hiz_mip_levels,
+                // _pad: [0; 3],
+            };
+        }
+        builder
+            .copy_buffer(CopyBufferInfo::buffers(
+                hi_z_info_buf,
+                self.uniform_hi_z_info.clone(),
+            ))
+            .unwrap();
+    }
+
+    pub fn update_culling_uniform(
+        &self,
+        gpu: &GPUManager,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        aspect: f32,
+    ) {
+        builder
+            .copy_buffer(CopyBufferInfo::buffers(
+                self.uniform.clone(),
+                self.uniform_culling.clone(),
+            ))
+            .unwrap();
     }
     pub fn translate(&mut self, v: Vec3) {
         self.pos += self.rot * v;

@@ -31,7 +31,7 @@ use vulkano::{
     swapchain::{Surface, Swapchain, SwapchainCreateInfo},
     sync::{self, GpuFuture},
 };
-use winit::{event_loop::ActiveEventLoop, window::Window};
+use winit::{dpi::LogicalSize, event_loop::ActiveEventLoop, window::Window};
 
 use crate::{
     NUM_CUBES,
@@ -74,7 +74,10 @@ impl RenderContext {
     pub fn new(event_loop: &ActiveEventLoop, gpu: &GPUManager, camera: Arc<Mutex<Camera>>) -> Self {
         let window = Arc::new(
             event_loop
-                .create_window(Window::default_attributes())
+                .create_window(Window::default_attributes().with_inner_size(LogicalSize {
+					width: 800.0,
+					height: 600.0,
+				}))
                 .unwrap(),
         );
         let surface = Surface::from_window(gpu.instance.clone(), window.clone()).unwrap();
@@ -297,7 +300,7 @@ impl RenderContext {
         assets: &AssetManager,
         rendering_system: &mut crate::renderer::RenderingSystem,
         matrix_data: &Subbuffer<[crate::transform::compute::cs::MatrixData]>,
-        // add camera
+        hiz_frozen: bool,
     ) {
         let window_size = self.window.inner_size();
 
@@ -305,7 +308,8 @@ impl RenderContext {
         camera.resize(gpu, [window_size.width, window_size.height]);
 
         let mut builder = gpu.create_command_buffer(CommandBufferUsage::SimultaneousUse);
-        rendering_system.update_mvp(camera.uniform.clone(), &mut builder, matrix_data, &camera);
+
+        rendering_system.update_mvp(camera.uniform_culling.clone(), &mut builder, matrix_data, &camera);
 
         builder
             .begin_rendering(RenderingInfo {
@@ -341,7 +345,7 @@ impl RenderContext {
         // Generate Hi-Z AFTER rendering so it's ready for the next frame's occlusion culling
         // Note: Vulkano handles synchronization automatically between rendering and compute
         // This includes copying depth to Hi-Z mip 0, then generating the mip pyramid
-        rendering_system.generate_hiz(&mut builder, &camera);
+        rendering_system.generate_hiz(&mut builder, &camera, hiz_frozen);
 
         // We leave the render pass.
         self.command_buffer = Some(builder.build().unwrap());

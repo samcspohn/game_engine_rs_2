@@ -13,6 +13,7 @@
 // original triangle example.
 #![feature(sync_unsafe_cell)]
 #![feature(portable_simd)]
+#![allow(warnings)]
 // #![feature(int_roundings)]
 #[allow(static_mut_refs)]
 use camera::Camera;
@@ -173,6 +174,7 @@ struct App {
     extra_perfs: BTreeMap<String, PerfCounter>,
     paused: bool,
     update_transforms_compute_shader: bool,
+    hiz_frozen: bool,
     // sim_thread: std::thread::JoinHandle<()>,
     sim_frame_start: SyncSender<f32>,
     sim_frame_end: Receiver<()>,
@@ -400,6 +402,7 @@ impl App {
             extra_perfs: BTreeMap::new(),
             paused: false,
             update_transforms_compute_shader: true,
+            hiz_frozen: false,
             // sim_thread,
             sim_frame_start,
             sim_frame_end: sim_frame_end_rcv,
@@ -442,8 +445,8 @@ impl ApplicationHandler for App {
         let camera = Arc::new(Mutex::new(Camera::new(
             &self.gpu,
             [800, 600],
-            1.0,
-            100.0,
+            0.01,
+            10_000.0,
         )));
         let rcx = RenderContext::new(event_loop, &self.gpu, camera.clone());
         let window_id = rcx.window.id();
@@ -595,6 +598,7 @@ impl ApplicationHandler for App {
                         &self.asset_manager,
                         &mut self.rendering_system.lock(),
                         &self.transform_compute.matrix_buffer,
+                        self.hiz_frozen,
                     );
                 }
                 rcx.build_command_buffer_perf.start();
@@ -609,15 +613,6 @@ impl ApplicationHandler for App {
                     .entry("join and execute".into())
                     .or_insert(PerfCounter::new())
                     .start();
-                // let a = self.frames_in_flight[self.current_frame]
-                //     .take()
-                //     .unwrap()
-                //     .join(acquire_future)
-                //     .then_execute(
-                //         gpu.queue.clone(),
-                //         rcx.command_buffer.as_ref().unwrap().clone(),
-                //     )
-                //     .unwrap();
                 self.commands
                     .push(rcx.command_buffer.as_ref().unwrap().clone());
                 rcx.extra_perfs.get_mut("join and execute").unwrap().stop();
@@ -782,7 +777,15 @@ impl ApplicationHandler for App {
             .start();
         for (_window_id, rcx) in self.rcxs.iter_mut() {
             let cam = self.camera.get_mut(&_window_id).unwrap();
-            cam.lock().update_uniform(
+            let cam_ = cam.lock();
+            if !self.hiz_frozen {
+                cam_.update_culling_uniform(
+                    &self.gpu,
+                    &mut builder,
+                    rcx.viewport.extent[0] / rcx.viewport.extent[1].abs(),
+                );
+            }
+            cam_.update_uniform(
                 &self.gpu,
                 &mut builder,
                 rcx.viewport.extent[0] / rcx.viewport.extent[1].abs(),
@@ -837,6 +840,7 @@ impl ApplicationHandler for App {
         let mut new_window = false;
         let mut new_bismarck = false;
         let mut new_b52 = false;
+        let mut clear_command_buffers = false;
         self.extra_perfs.get_mut("1").unwrap().stop();
         self.extra_perfs
             .entry("2".to_owned())
@@ -878,6 +882,12 @@ impl ApplicationHandler for App {
                     self.update_transforms_compute_shader
                 );
             }
+            if rcx.input.get_key_pressed(KeyCode::KeyH) {
+                self.hiz_frozen = !self.hiz_frozen;
+                println!("HiZ frozen: {}", self.hiz_frozen);
+                // Force command buffer rebuild to update HiZ generation behavior
+                clear_command_buffers = true;
+            }
             self.cursor_grabbed = grabbed;
             // rcx.gui.immediate_ui(|gui| {
             //     let ctx = gui.context();
@@ -891,12 +901,19 @@ impl ApplicationHandler for App {
         }
         self.extra_perfs.get_mut("2").unwrap().stop();
 
+        // Clear command buffers if HiZ freeze state changed
+        if clear_command_buffers {
+            for (_wid, rcx) in self.rcxs.iter_mut() {
+                rcx.command_buffer = None;
+            }
+        }
+
         if new_window {
             let camera = Arc::new(Mutex::new(Camera::new(
                 &self.gpu,
                 [800, 600],
-                1.0,
-                100.0,
+                0.01,
+                10_000.0,
             )));
             let rcx = RenderContext::new(_event_loop, &self.gpu, camera.clone());
             let window_id = rcx.window.id();
@@ -981,6 +998,10 @@ impl ApplicationHandler for App {
             let mut last_print = LAST_PRINT.lock();
             if last_print.elapsed().as_secs_f32() > 2.0 {
                 println!(
+                    "hiz locked: {}",
+                    if self.hiz_frozen { "true" } else { "false" }
+                );
+                println!(
                     "frame time: {:?} / update sim: {:?} / update render: {:?} / fps: {:.2}",
                     self.frame_time, self.update_sim, self.update_render, fps
                 );
@@ -1014,10 +1035,10 @@ impl ApplicationHandler for App {
                     }
                     println!("");
                     self.world.lock().perf.as_ref().map(|perf| {
-						for (name, counter) in perf.iter() {
-							println!("  Sim Perf {}: {:?} ms", name, counter);
-						}
-					});
+                        for (name, counter) in perf.iter() {
+                            println!("  Sim Perf {}: {:?} ms", name, counter);
+                        }
+                    });
                     println!("");
                     println!("Camera position: {:?}", rcx.camera.lock().pos);
                 }

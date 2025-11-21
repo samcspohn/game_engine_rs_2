@@ -79,11 +79,19 @@ layout(set = 0, binding = 9) buffer AABBs {
 // Hi-Z buffer for occlusion culling (optional - may be dummy texture if not initialized)
 layout(set = 1, binding = 0) uniform sampler2D hizBuffer;
 
-layout(set = 1, binding = 1) uniform camera {
+// Camera uniform for occlusion culling (can be frozen for debugging)
+layout(set = 1, binding = 1) uniform cameraCulling {
     mat4 view;
     mat4 proj;
 }
-cam;
+camCulling;
+
+// Camera uniform for rendering (always uses current camera state)
+layout(set = 1, binding = 3) uniform cameraRendering {
+    mat4 view;
+    mat4 proj;
+}
+camRender;
 
 layout(set = 1, binding = 2) uniform HiZInfo {
     ivec2 screenResolution;
@@ -126,8 +134,12 @@ bool isOccluded(uint meshId, uint transformId) {
         return false; // Don't cull if we don't have AABB data
     }
     AABB bbox = aabbs[meshId];
-    mat4 modelMatrix = m[transformId].model;
-    mat4 viewProj = cam.proj * cam.view;
+    vec3 center = (bbox.min.xyz + bbox.max.xyz) * 0.5;
+    vec3 extents = (bbox.max.xyz - bbox.min.xyz) * 0.5;
+    bbox.max.xyz = center + extents * 1.05; // Slightly expand to avoid precision issues
+    bbox.min.xyz = center - extents * 1.05;
+
+    mat4 mvp = camCulling.proj * camCulling.view * m[transformId].model;
 
     // 1. Generate and transform 8 corners
     vec3 corners[8];
@@ -145,20 +157,28 @@ bool isOccluded(uint meshId, uint transformId) {
     vec2 screenMax = vec2(-1e10);
     float minDepth = 1.0;
     bool anyInFront = false;
+    bool anyBehind = false;
 
     for (int i = 0; i < 8; ++i) {
-        vec4 worldPos = modelMatrix * vec4(corners[i], 1.0);
-        vec4 clipPos = viewProj * worldPos;
+        vec4 clipPos = mvp * vec4(corners[i], 1.0);
 
         if (clipPos.w > 0.0) {
             anyInFront = true;
             vec3 ndc = clipPos.xyz / clipPos.w;
-            vec2 screenPos = ndc.xy * 0.5 + 0.5;
+            // Vulkan uses inverted Y viewport (Y increases downward)
+            vec2 screenPos = vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
 
             screenMin = min(screenMin, screenPos);
             screenMax = max(screenMax, screenPos);
             minDepth = min(minDepth, ndc.z);
+        } else {
+            anyBehind = true;
         }
+    }
+
+    // Camera is inside or intersecting the AABB - don't cull
+    if (anyInFront && anyBehind) {
+        return false;
     }
 
     // All corners behind camera
@@ -185,27 +205,18 @@ bool isOccluded(uint meshId, uint transformId) {
     }
 
     int numMips = textureQueryLevels(hizBuffer);
-    float mipLevel = clamp(ceil(log2(maxDim)), 0.0, float(numMips - 1));
+    int mipLevel = int(clamp(ceil(log2(maxDim)), 0.0, float(numMips - 1)));
 
-    // 4. Sample Hi-Z (conservative: check 4 corners)
-    // Hi-Z stores MAX (furthest) depth per region
-    // We take MIN of samples to get the closest occluder among the 4 corners
     float d0 = textureLod(hizBuffer, screenMin, mipLevel).r;
     float d1 = textureLod(hizBuffer, vec2(screenMax.x, screenMin.y), mipLevel).r;
     float d2 = textureLod(hizBuffer, vec2(screenMin.x, screenMax.y), mipLevel).r;
     float d3 = textureLod(hizBuffer, screenMax, mipLevel).r;
-    float occluderDepth = min(min(d0, d1), min(d2, d3));
+    float occluderDepth = max(max(d0, d1), max(d2, d3));
 
-    // 5. Compare depths
-    const float bias = 0.001;
-
-    // Additional safety: if occluder depth is 0.0 (near plane), don't cull
-    // This handles the case where Hi-Z might not be properly initialized
-    if (occluderDepth <= 0.0001) {
-        return false;
-    }
-
-    return (minDepth > occluderDepth + bias);
+    // float bias = max(0.00001, occluderDepth * 0.0001); // 0.01% of depth value
+    // float bias = 1.0 + 0.00001; // Fixed small bias
+    bool visible = minDepth <= occluderDepth;
+    return !visible;
 }
 
 // case 0: apply updates
@@ -214,13 +225,15 @@ bool isOccluded(uint meshId, uint transformId) {
 // case 3: prefix sum first instance
 // case 4: write indirect commands
 
-float closeness(uint meshId, uint transformId) {
+float closeness(uint
+    meshId, uint
+    transformId) {
     mat4 modelMatrix = m[transformId].model;
     AABB bbox = aabbs[meshId];
     // vec4 center = (bbox.min + bbox.max) * 0.5;
     vec4 center = vec4((bbox.min.xyz + bbox.max.xyz) * 0.5, 1.0);
     vec4 worldPos = modelMatrix * center;
-    vec4 viewPos = cam.view * worldPos;
+    vec4 viewPos = camCulling.view * worldPos;
     return length(viewPos.xyz);
     // vec4 worldPos = modelMatrix * vec4(0.0, 0.0, 0.0, 1.0);
     // vec4 viewPos = cam.view * worldPos;
@@ -260,6 +273,7 @@ void main() {
         break;
         case 2:
         {
+            // count all instances for each renderer to make space for all cameras
             Renderer r = renderers[idx];
             // Skip invalid/uninitialized renderers
             if (r.m_id == uint(-1) || r.t_idx == uint(-1)) {
@@ -270,10 +284,6 @@ void main() {
                 break;
             }
             for (uint i = 0; i < mc.count; ++i) {
-                // Occlusion test: only count visible meshes
-                if (isOccluded(mc.offset + i, r.t_idx)) {
-                    // continue;
-                }
                 atomicAdd(indirect[mc.offset + i].firstInstance, 1);
             }
             // atomicAdd(indirect[r.m_id].firstInstance, 1);
@@ -326,11 +336,12 @@ void main() {
                         break;
                     }
                     mat4 model_matrix = m[r.t_idx].model;
-                    m[r.t_idx].mvp = cam.proj * cam.view * model_matrix;
+                    m[r.t_idx].mvp = camRender.proj * camRender.view * model_matrix;
                     // mat3 normal = inverse(transpose(mat3(model_matrix)));
                     for (uint i = 0; i < mc.count; ++i) {
+                        // Occlusion test: only count visible meshes
                         if (isOccluded(mc.offset + i, r.t_idx)) {
-                            // continue;
+                            continue;
                         }
                         // if (closeness(mc.offset + i, r.t_idx) > 10.0) {
                         //     continue;

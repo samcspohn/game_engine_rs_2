@@ -54,9 +54,27 @@ void main() {
     // Write first output mip (mip N+1)
     if (pc.numMips >= 1) {
         uvec2 dstCoord = workGroupId * 16 + localCoord;
-        uvec2 dstSize = (pc.srcResolution + 1) / 2;
+        uvec2 dstSize = pc.srcResolution / 2;
+        uvec2 dstSize2 = (pc.srcResolution + 1) / 2; // Handle odd sizes
+
         if (dstCoord.x < dstSize.x && dstCoord.y < dstSize.y) {
             imageStore(dstMip0, ivec2(dstCoord), vec4(maxDepth));
+            // imageAtomicMin(dstMip0, ivec2(dstCoord), vec4(maxDepth));
+        }
+        // handle odd width
+        if ((dstSize.x & 1) == 1 && dstSize2.x - 2 == dstCoord.x) {
+            // Handle odd width by comparing with last column
+            float d0 = texelFetch(srcMip, ivec2(min(srcCoord.x + 2, pc.srcResolution.x - 1), srcCoord.y), 0).r;
+            float d1 = texelFetch(srcMip, ivec2(min(srcCoord.x + 2, pc.srcResolution.x - 1), min(srcCoord.y + 1, pc.srcResolution.y - 1)), 0).r;
+            maxDepth = max(maxDepth, max(d0, d1));
+            imageStore(dstMip0, ivec2(dstCoord.x, dstCoord.y), vec4(maxDepth));
+        }
+        if ((dstSize.y & 1) == 1 && dstSize2.y - 2 == dstCoord.y) {
+            // Handle odd height by comparing with last row
+            float d0 = texelFetch(srcMip, ivec2(srcCoord.x, min(srcCoord.y + 2, pc.srcResolution.y - 1)), 0).r;
+            float d1 = texelFetch(srcMip, ivec2(min(srcCoord.x + 1, pc.srcResolution.x - 1), min(srcCoord.y + 2, pc.srcResolution.y - 1)), 0).r;
+            maxDepth = max(maxDepth, max(d0, d1));
+            imageStore(dstMip0, ivec2(dstCoord.x, dstCoord.y), vec4(maxDepth));
         }
     }
 
@@ -75,9 +93,26 @@ void main() {
             sharedDepth[localCoord.y][localCoord.x] = maxDepth;
 
             uvec2 dstCoord = workGroupId * 8 + localCoord / 2;
-            uvec2 dstSize = (pc.srcResolution + 3) / 4;
+            uvec2 dstSize = pc.srcResolution / 4;
+            uvec2 dstSize2 = (pc.srcResolution + 3) / 4; // Handle odd sizes
             if (dstCoord.x < dstSize.x && dstCoord.y < dstSize.y) {
                 imageStore(dstMip1, ivec2(dstCoord), vec4(maxDepth));
+            }
+            // handle odd width
+            if ((dstSize.x & 1) == 1 && dstSize2.x - 2 == dstCoord.x) {
+                // Handle odd width by comparing with last column
+                float d0 = sharedDepth[localCoord.y][min(localCoord.x + 2, 15)];
+                float d1 = sharedDepth[min(localCoord.y + 1, 15)][min(localCoord.x + 2, 15)];
+                maxDepth = max(maxDepth, max(d0, d1));
+                imageStore(dstMip1, ivec2(dstCoord.x, dstCoord.y), vec4(maxDepth));
+            }
+            // handle odd height
+            if ((dstSize.y & 1) == 1 && dstSize2.y - 2 == dstCoord.y) {
+                // Handle odd height by comparing with last row
+                float d0 = sharedDepth[min(localCoord.y + 2, 15)][localCoord.x];
+                float d1 = sharedDepth[min(localCoord.y + 2, 15)][min(localCoord.x + 1, 15)];
+                maxDepth = max(maxDepth, max(d0, d1));
+                imageStore(dstMip1, ivec2(dstCoord.x, dstCoord.y), vec4(maxDepth));
             }
         }
     }
@@ -97,9 +132,26 @@ void main() {
             sharedDepth[localCoord.y][localCoord.x] = maxDepth;
 
             uvec2 dstCoord = workGroupId * 4 + localCoord / 4;
-            uvec2 dstSize = (pc.srcResolution + 7) / 8;
+            uvec2 dstSize = pc.srcResolution / 8;
+            uvec2 dstSize2 = (pc.srcResolution + 7) / 8; // Handle odd sizes
             if (dstCoord.x < dstSize.x && dstCoord.y < dstSize.y) {
                 imageStore(dstMip2, ivec2(dstCoord), vec4(maxDepth));
+            }
+            // handle odd width
+            if ((dstSize.x & 1) == 1 && dstSize2.x - 2 == dstCoord.x) {
+                // Handle odd width by comparing with last column
+                float d0 = sharedDepth[localCoord.y][min(localCoord.x + 4, 15)];
+                float d1 = sharedDepth[min(localCoord.y + 2, 15)][min(localCoord.x + 4, 15)];
+                maxDepth = max(maxDepth, max(d0, d1));
+                imageStore(dstMip2, ivec2(dstCoord.x, dstCoord.y), vec4(maxDepth));
+            }
+            // handle odd height
+            if ((dstSize.y & 1) == 1 && dstSize2.y - 2 == dstCoord.y) {
+                // Handle odd height by comparing with last row
+                float d0 = sharedDepth[min(localCoord.y + 4, 15)][localCoord.x];
+                float d1 = sharedDepth[min(localCoord.y + 4, 15)][min(localCoord.x + 2, 15)];
+                maxDepth = max(maxDepth, max(d0, d1));
+                imageStore(dstMip2, ivec2(dstCoord.x, dstCoord.y), vec4(maxDepth));
             }
         }
     }
@@ -118,9 +170,26 @@ void main() {
             maxDepth = max(max(d00, d10), max(d01, d11));
 
             uvec2 dstCoord = workGroupId * 2 + localCoord / 8;
-            uvec2 dstSize = (pc.srcResolution + 15) / 16;
+            uvec2 dstSize = pc.srcResolution / 16;
+            uvec2 dstSize2 = (pc.srcResolution + 15) / 16; // Handle odd sizes
             if (dstCoord.x < dstSize.x && dstCoord.y < dstSize.y) {
                 imageStore(dstMip3, ivec2(dstCoord), vec4(maxDepth));
+            }
+            // handle odd width
+            if ((dstSize.x & 1) == 1 && dstSize2.x - 2 == dstCoord.x) {
+                // Handle odd width by comparing with last column
+                float d0 = sharedDepth[localCoord.y][min(localCoord.x + 8, 15)];
+                float d1 = sharedDepth[min(localCoord.y + 4, 15)][min(localCoord.x + 8, 15)];
+                maxDepth = max(maxDepth, max(d0, d1));
+                imageStore(dstMip3, ivec2(dstCoord.x, dstCoord.y), vec4(maxDepth));
+            }
+            // handle odd height
+            if ((dstSize.y & 1) == 1 && dstSize2.y - 2 == dstCoord.y) {
+                // Handle odd height by comparing with last row
+                float d0 = sharedDepth[min(localCoord.y + 8, 15)][localCoord.x];
+                float d1 = sharedDepth[min(localCoord.y + 8, 15)][min(localCoord.x + 4, 15)];
+                maxDepth = max(maxDepth, max(d0, d1));
+                imageStore(dstMip3, ivec2(dstCoord.x, dstCoord.y), vec4(maxDepth));
             }
         }
     }

@@ -177,6 +177,7 @@ fn recursive_access_node(
                     _mesh.normals.push(pack_normal(normal));
                 }
             }
+            std::thread::yield_now();
             // Read texture coordinates (UV)
             if let Some(tex_coords_iter) = reader.read_tex_coords(0) {
                 _mesh.tex_coords.extend(tex_coords_iter.into_f32());
@@ -293,30 +294,9 @@ fn recursive_access_node(
                     }
                 }
             }
-            _mesh.aabb.min = primitive.bounding_box().min.into();
-            _mesh.aabb.max = primitive.bounding_box().max.into();
-
-           // _mesh.aabb = obj_loader::AABB {
-           //      min: [
-           //          _mesh.vertices.iter().map(|v| v[0]).fold(f32::INFINITY, f32::min),
-           //          _mesh.vertices.iter().map(|v| v[1]).fold(f32::INFINITY, f32::min),
-           //          _mesh.vertices.iter().map(|v| v[2]).fold(f32::INFINITY, f32::min),
-           //      ],
-           //      max: [
-           //          _mesh.vertices
-           //              .iter()
-           //              .map(|v| v[0])
-           //              .fold(f32::NEG_INFINITY, f32::max),
-           //          _mesh.vertices
-           //              .iter()
-           //              .map(|v| v[1])
-           //              .fold(f32::NEG_INFINITY, f32::max),
-           //          _mesh.vertices
-           //              .iter()
-           //              .map(|v| v[2])
-           //              .fold(f32::NEG_INFINITY, f32::max),
-           //      ],
-           //  };
+            let bbox = primitive.bounding_box();
+            _mesh.aabb.min = [bbox.min[0], bbox.min[1], bbox.min[2]];
+            _mesh.aabb.max = [bbox.max[0], bbox.max[1], bbox.max[2]];
 
             meshes.push(_mesh);
         }

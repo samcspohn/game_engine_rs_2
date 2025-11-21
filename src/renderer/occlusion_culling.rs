@@ -151,6 +151,7 @@ impl HiZGenerator {
         gpu: &GPUManager,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         camera: &Camera,
+        hiz_frozen: bool,
     ) {
         let _hiz_image = camera.hiz_image.as_ref().expect("Hi-Z image not initialized");
         let hiz_views = camera.hiz_views.as_ref().expect("Hi-Z views not initialized");
@@ -163,8 +164,10 @@ impl HiZGenerator {
         let width = camera.depth_image.extent()[0];
         let height = camera.depth_image.extent()[1];
 
-        // Step 1: Copy depth buffer to Hi-Z mip 0
-        self.copy_depth_to_hiz_mip0(gpu, builder, camera);
+        if !hiz_frozen {
+	        // Step 1: Copy depth buffer to Hi-Z mip 0
+	        self.copy_depth_to_hiz_mip0(gpu, builder, camera);
+        }
 
         // Step 2: Generate remaining mips in batches of 4 using shared memory reduction
         let mut src_mip = 0u32;

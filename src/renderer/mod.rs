@@ -63,7 +63,7 @@ pub struct RenderingSystem {
     gpu: Arc<GPUManager>,
     pipeline: Arc<ComputePipeline>,
     pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
-    hiz_sampler: Arc<vulkano::image::sampler::Sampler>,
+    dummy_hiz_sampler: Arc<vulkano::image::sampler::Sampler>,
     dummy_hiz_view: Arc<ImageView>,
     occlusion_culling: occlusion_culling::HiZGenerator,
     // buffers
@@ -188,6 +188,7 @@ impl RenderingSystem {
                 mag_filter: vulkano::image::sampler::Filter::Nearest,
                 min_filter: vulkano::image::sampler::Filter::Nearest,
                 mipmap_mode: vulkano::image::sampler::SamplerMipmapMode::Nearest,
+                lod: 0.0..=1000.0,  // Enable mip level access for textureQueryLevels
                 ..Default::default()
             },
         )
@@ -219,7 +220,7 @@ impl RenderingSystem {
             command_buffer: None,
             pipeline,
             occlusion_culling,
-            hiz_sampler,
+            dummy_hiz_sampler: hiz_sampler,
             dummy_hiz_view,
             indirect_commands_buffer: GpuVec::new(
                 &gpu,
@@ -436,6 +437,8 @@ impl RenderingSystem {
             &self.gpu,
             builder,
         );
+
+        ret |= self.aabbs_buffer.upload_delta(&self.gpu, builder);
         // println!("ret/mvp_buffer: {}", ret);
         // println!("Renderer System: {} MVPs", self.mvp_count.load(Ordering::SeqCst));
 
@@ -492,10 +495,11 @@ impl RenderingSystem {
                     WriteDescriptorSet::image_view_sampler(
                         0,
                         self.dummy_hiz_view.clone(),
-                        self.hiz_sampler.clone(),
+                        self.dummy_hiz_sampler.clone(),
                     ),
                     WriteDescriptorSet::buffer(1, self.gpu.empty.clone()),
                     WriteDescriptorSet::buffer(2, self.gpu.empty.clone()),
+                    WriteDescriptorSet::buffer(3, self.gpu.empty.clone()),
                 ],
                 [],
             )
@@ -615,7 +619,7 @@ impl RenderingSystem {
         let layout1 = self.pipeline.layout().set_layouts().get(1).unwrap();
 
         // Bind Hi-Z buffer if available, otherwise use dummy texture
-        let set1 = if let Some(hiz_view) = &camera.hiz_view_all_mips {
+        let set1 = if let (Some(hiz_view), Some(hiz_sampler)) = (&camera.hiz_view_all_mips, &camera.hiz_sampler) {
             DescriptorSet::new(
                 self.gpu.desc_alloc.clone(),
                 layout1.clone(),
@@ -623,10 +627,11 @@ impl RenderingSystem {
                     WriteDescriptorSet::image_view_sampler(
                         0,
                         hiz_view.clone(),
-                        self.hiz_sampler.clone(),
+                        hiz_sampler.clone(),
                     ),
                     WriteDescriptorSet::buffer(1, cam),
                     WriteDescriptorSet::buffer(2, camera.uniform_hi_z_info.clone()),
+                    WriteDescriptorSet::buffer(3, camera.uniform.clone()),
                 ],
                 [],
             )
@@ -640,10 +645,11 @@ impl RenderingSystem {
                     WriteDescriptorSet::image_view_sampler(
                         0,
                         self.dummy_hiz_view.clone(),
-                        self.hiz_sampler.clone(),
+                        self.dummy_hiz_sampler.clone(),
                     ),
                     WriteDescriptorSet::buffer(1, cam),
                     WriteDescriptorSet::buffer(2, camera.uniform_hi_z_info.clone()),
+                    WriteDescriptorSet::buffer(3, camera.uniform.clone()),
                 ],
                 [],
             )
@@ -685,8 +691,9 @@ impl RenderingSystem {
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         camera: &crate::camera::Camera,
+        hiz_frozen: bool,
     ) {
-        self.occlusion_culling.generate_hiz(&self.gpu, builder, camera);
+        self.occlusion_culling.generate_hiz(&self.gpu, builder, camera, hiz_frozen);
     }
 
     // assume pipeline already bound

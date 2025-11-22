@@ -8,7 +8,7 @@ use std::{
     u32,
 };
 
-use egui::layers;
+// use egui::layers;
 use vulkano::{
     buffer::{BufferContents, BufferUsage, Subbuffer},
     command_buffer::{
@@ -709,7 +709,8 @@ impl RenderingSystem {
             return;
         }
         if self.indirect_commands_buffer.data_len() > self.indirect_commands_buffer.buf_len() {
-            panic!("Indirect commands buffer not up to date");
+            // panic!("Indirect commands buffer not up to date");
+            return;
         }
 
         // let texture: Arc<Texture> = AssetHandle::default().get(assets);

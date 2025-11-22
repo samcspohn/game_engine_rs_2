@@ -1,7 +1,7 @@
 use std::sync::{Arc, atomic::AtomicBool};
 use std::sync::mpsc::Receiver;
 
-use egui_winit_vulkano::Gui;
+// use egui_winit_vulkano::Gui;
 use parking_lot::Mutex;
 use vulkano::{
     Validated,
@@ -25,7 +25,7 @@ pub struct RenderData {
     pub aquire_future: SwapchainAcquireFuture,
     pub commands: Vec<Arc<PrimaryAutoCommandBuffer>>,
     pub swapchain: Arc<Swapchain>,
-    pub gui: Arc<Mutex<Gui>>,
+    // pub gui: Arc<Mutex<Gui>>,
     pub image_view: Arc<ImageView>,
     pub fps: f32,
 }

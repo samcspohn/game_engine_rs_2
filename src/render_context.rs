@@ -1,6 +1,6 @@
 use std::{collections::HashMap, hash::Hash, sync::Arc};
 
-use egui_winit_vulkano::{Gui, GuiConfig};
+// use egui_winit_vulkano::{Gui, GuiConfig};
 use parking_lot::Mutex;
 use vulkano::{
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
@@ -51,8 +51,8 @@ pub struct RenderContext {
     pub viewport: Viewport,
     pub recreate_swapchain: bool,
     // pub previous_frame_end: Option<Box<dyn GpuFuture>>,
-    pub gui: Arc<Mutex<Gui>>,
-    pub gui_drawn: bool,
+    // pub gui: Arc<Mutex<Gui>>,
+    // pub gui_drawn: bool,
     pub command_buffer: Option<Arc<PrimaryAutoCommandBuffer>>,
     // pub image_view: Arc<ImageView>,
     // pub camera_uniform_buffer: Option<Subbuffer<crate::vs::camera>>,
@@ -226,17 +226,17 @@ impl RenderContext {
         let recreate_swapchain = false;
         // let previous_frame_end = Some(sync::now(gpu.device.clone()).boxed());
 
-        let gui = Gui::new(
-            &event_loop,
-            surface.clone(),
-            gpu.queue.clone(),
-            swapchain.image_format(),
-            GuiConfig {
-                is_overlay: true,
-                allow_srgb_render_target: true,
-                ..Default::default()
-            },
-        );
+        // let gui = Gui::new(
+        //     &event_loop,
+        //     surface.clone(),
+        //     gpu.queue.clone(),
+        //     swapchain.image_format(),
+        //     GuiConfig {
+        //         is_overlay: true,
+        //         allow_srgb_render_target: true,
+        //         ..Default::default()
+        //     },
+        // );
 
         // let mut gui = Gui::new_with_subpass(
         //     &event_loop,
@@ -256,8 +256,8 @@ impl RenderContext {
             viewport,
             recreate_swapchain,
             // previous_frame_end,
-            gui: Arc::new(Mutex::new(gui)),
-            gui_drawn: false,
+            // gui: Arc::new(Mutex::new(gui)),
+            // gui_drawn: false,
             command_buffer: None,
             camera,
             input: crate::input::Input::new(),

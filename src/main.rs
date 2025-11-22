@@ -83,6 +83,7 @@ mod render_thread;
 mod renderer;
 mod texture;
 mod transform;
+mod ui;
 mod util;
 fn main() -> Result<(), impl Error> {
     unsafe {
@@ -184,6 +185,7 @@ struct App {
     // render_data: Option<render_thread::RenderData>,
     commands: Vec<Arc<PrimaryAutoCommandBuffer>>,
     b52_entity: Arc<Mutex<Option<u32>>>,
+    ui: ui::UI,
 }
 
 impl App {
@@ -249,15 +251,15 @@ impl App {
             // );
             // bismarck_handle = Some(a);
 
-            let _b52_entity_arc = b52_entity_arc.clone();
-            let a = asset_manager.load_asset::<Scene>(
-                "/home/sspohn/Documents/b52.1-4.glb",
-                Some(Box::new(move |handle, arc_asset| {
-                    // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
-                    *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
-                })),
-            );
-            b52_handle = Some(a);
+            // let _b52_entity_arc = b52_entity_arc.clone();
+            // let a = asset_manager.load_asset::<Scene>(
+            //     "/home/sspohn/Documents/b52.1-4.glb",
+            //     Some(Box::new(move |handle, arc_asset| {
+            //         // _ready.store(true, std::sync::atomic::Ordering::SeqCst);
+            //         *_b52_entity_arc.lock() = Some(_world.lock().instantiate(&arc_asset).get_idx());
+            //     })),
+            // );
+            // b52_handle = Some(a);
 
             let dims = (NUM_CUBES as f64).powf(1.0 / 3.0).ceil() as u32;
 
@@ -371,6 +373,7 @@ impl App {
         });
 
         let rendering_system = world.lock().engine.rendering_system.clone();
+        let simple_ui = ui::UI::new(gpu.clone());
 
         App {
             asset_manager,
@@ -412,6 +415,7 @@ impl App {
             // render_data: None,
             commands: Vec::new(),
             b52_entity: b52_entity_arc,
+            ui: simple_ui,
         }
     }
 }
@@ -483,7 +487,7 @@ impl ApplicationHandler for App {
         }
         let rcx = self.rcxs.get_mut(&_window_id).unwrap();
 
-        rcx.gui.lock().update(&event);
+        // rcx.gui.lock().update(&event);
         match event {
             WindowEvent::CursorMoved {
                 device_id,
@@ -530,11 +534,12 @@ impl ApplicationHandler for App {
                 rcx.recreate_swapchain = true;
             }
             WindowEvent::RedrawRequested => {
-                if rcx.gui_drawn {
-                    rcx.gui_drawn = false;
-                } else {
-                    return;
-                }
+                // if rcx.gui_drawn {
+                //     rcx.gui_drawn = false;
+                // } else {
+                // if true {
+                //     return;
+                // }
                 rcx.frame_time.start();
                 let camera = self.camera.get_mut(&_window_id).unwrap();
 
@@ -626,6 +631,23 @@ impl ApplicationHandler for App {
                         rcx.attachment_images[image_index as usize].clone(),
                     ))
                     .unwrap();
+
+                rcx.extra_perfs
+					.entry("draw ui".into())
+					.or_insert(PerfCounter::new())
+					.start();
+                // Draw UI on top
+                let fps = self.fps.frame_times.len() as f32 / self.fps.time_sum;
+                self.ui.draw(
+                    &mut builder,
+                    rcx.attachment_image_views[image_index as usize].clone(),
+                    &rcx.viewport,
+                    fps,
+                );
+
+                self.ui.draw_text(&mut builder, rcx.attachment_image_views[image_index as usize].clone(), &rcx.viewport, "Hello, World!", 100.0, 50.0, 16.0);
+                rcx.extra_perfs.get_mut("draw ui").unwrap().stop();
+
                 let final_image_cmd = builder.build().unwrap();
                 self.commands.push(final_image_cmd.clone());
 
@@ -659,7 +681,7 @@ impl ApplicationHandler for App {
                     aquire_future: acquire_future,
                     commands: self.commands.drain(..).collect(),
                     swapchain: rcx.swapchain.clone(),
-                    gui: rcx.gui.clone(),
+                    // gui: rcx.gui.clone(),
                     image_view: rcx.attachment_image_views[image_index as usize].clone(),
                     fps: self.fps.frame_times.len() as f32 / self.fps.time_sum,
                 };
@@ -895,7 +917,7 @@ impl ApplicationHandler for App {
             //         ui.label(format!("{:.2} fps", fps));
             //     });
             // });
-            rcx.gui_drawn = true;
+            // rcx.gui_drawn = true;
             rcx.window.request_redraw();
             rcx.input.update();
         }

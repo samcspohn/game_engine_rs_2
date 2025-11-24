@@ -75,6 +75,9 @@ pub struct RenderingSystem {
     texture_map: HashMap<u32, u32>, // texture asset_id -> texture idx
     registered_textures: Vec<AssetHandle<Texture>>, // to avoid duplicate texture loads
     renderer_buffer: GpuVec<cs::Renderer>,
+    post_render_buffer: GpuVec<cs::PostRenderData>,
+    post_render_indirect: Subbuffer<[DispatchIndirectCommand]>,
+    post_render_count: Subbuffer<u32>,
     renderer_inits_buffer: GpuVec<cs::RendererInit>,
     renderer_uninits_buffer: GpuVec<u32>,
     model_indirect_buffer: GpuVec<cs::ModelIndirect>, // [indirect_offset, count]
@@ -162,7 +165,7 @@ impl Component for _RendererComponent {
     }
 }
 
-const NUM_STAGES: u64 = 9;
+const NUM_STAGES: u64 = 12;
 impl RenderingSystem {
     pub fn new(gpu: Arc<GPUManager>) -> Self {
         let shader = cs::load(gpu.device.clone()).unwrap();
@@ -188,7 +191,7 @@ impl RenderingSystem {
                 mag_filter: vulkano::image::sampler::Filter::Nearest,
                 min_filter: vulkano::image::sampler::Filter::Nearest,
                 mipmap_mode: vulkano::image::sampler::SamplerMipmapMode::Nearest,
-                lod: 0.0..=1000.0,  // Enable mip level access for textureQueryLevels
+                lod: 0.0..=1000.0, // Enable mip level access for textureQueryLevels
                 ..Default::default()
             },
         )
@@ -235,6 +238,16 @@ impl RenderingSystem {
             indirect_material_vec: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
             material_vec: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
             aabbs_buffer: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, true),
+            post_render_buffer: GpuVec::new(&gpu, BufferUsage::STORAGE_BUFFER, false),
+            post_render_indirect: gpu.buffer_array(
+                1,
+                MemoryTypeFilter::PREFER_DEVICE,
+                BufferUsage::INDIRECT_BUFFER | BufferUsage::STORAGE_BUFFER,
+            ),
+            post_render_count: gpu.buffer_data(
+                MemoryTypeFilter::PREFER_DEVICE,
+                BufferUsage::STORAGE_BUFFER | BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
+            ),
             // material_vec: Vec::new(),
             texture_map: HashMap::new(),
             registered_textures: Vec::new(),
@@ -316,11 +329,14 @@ impl RenderingSystem {
         //     self.mvp_count
         //         .fetch_sub(mc.count * mc.num_mesh, Ordering::SeqCst);
         // });
-        self.model_counts.get_mut(&ind_idx).map(|mc| {
-            mc.num_mesh = mesh_count;
-            self.mvp_count
-                .fetch_add(mesh_count * mc.count, Ordering::SeqCst);
-        }).unwrap();
+        self.model_counts
+            .get_mut(&ind_idx)
+            .map(|mc| {
+                mc.num_mesh = mesh_count;
+                self.mvp_count
+                    .fetch_add(mesh_count * mc.count, Ordering::SeqCst);
+            })
+            .unwrap();
         self.mvp_count.store(1 << 20, Ordering::SeqCst); // hack to force resize next frame
 
         let indirect_offset = self.indirect_commands_buffer.data_len() as u32;
@@ -437,6 +453,12 @@ impl RenderingSystem {
             &self.gpu,
             builder,
         );
+        ret |= self.post_render_buffer.resize_buffer(
+            // self.mvp_count.load(Ordering::SeqCst) as usize,
+            self.mvp_count.load(Ordering::SeqCst) as usize,
+            &self.gpu,
+            builder,
+        );
 
         ret |= self.aabbs_buffer.upload_delta(&self.gpu, builder);
         // println!("ret/mvp_buffer: {}", ret);
@@ -481,6 +503,7 @@ impl RenderingSystem {
                     WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.buf()),
                     WriteDescriptorSet::buffer(8, self.indirect_material_vec.buf()),
                     WriteDescriptorSet::buffer(9, self.gpu.empty.clone()),
+                    WriteDescriptorSet::buffer(10, self.post_render_buffer.buf()),
                     // WriteDescriptorSet::buffer(9, normal_matrices.clone()),
                 ],
                 [],
@@ -511,10 +534,11 @@ impl RenderingSystem {
                     DescriptorSet::new(
                         self.gpu.desc_alloc.clone(),
                         layout2.clone(),
-                        [WriteDescriptorSet::buffer(
-                            0,
-                            self.stages.clone().slice(i..=i),
-                        )],
+                        [
+                            WriteDescriptorSet::buffer(0, self.stages.clone().slice(i..=i)),
+                            WriteDescriptorSet::buffer(1, self.gpu.empty.clone()),
+                            WriteDescriptorSet::buffer(2, self.gpu.empty.clone()),
+                        ],
                         [],
                     )
                     .unwrap()
@@ -577,6 +601,9 @@ impl RenderingSystem {
             set_dispatch_stage(self.indirect_commands_buffer.data_len(), 6, 3, 2); // stage 3, 2 prefix sum - add sums
             set_dispatch_stage(self.indirect_commands_buffer.data_len(), 7, 4, 0); // stage 4, 0 reset instance counts
             set_dispatch_stage(self.renderer_storage.len(), 8, 4, 1); // stage 4, 1 generate draw commands
+            set_dispatch_stage(1, 9, 5, 0); // stage 5, 0 set post-render indirect dispatch
+            set_dispatch_stage(self.indirect_commands_buffer.data_len(), 10, 5, 1); // stage 5, 1 reset instance counts again
+            set_dispatch_stage(-1i32 as usize, 11, 5, 2); // stage 5, 2 re-check occlusion
         }
         builder
             .copy_buffer(CopyBufferInfo::buffers(dispatch_buf, self.dispatch.clone()))
@@ -594,6 +621,8 @@ impl RenderingSystem {
         matrix_data: &Subbuffer<[crate::transform::compute::cs::MatrixData]>,
         camera: &crate::camera::Camera,
     ) {
+    	builder.update_buffer(self.post_render_count.clone(), &0).unwrap();
+
         builder
             .bind_pipeline_compute(self.pipeline.clone())
             .unwrap();
@@ -612,6 +641,7 @@ impl RenderingSystem {
                 WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.buf()),
                 WriteDescriptorSet::buffer(8, self.indirect_material_vec.buf()),
                 WriteDescriptorSet::buffer(9, self.aabbs_buffer.buf()),
+                WriteDescriptorSet::buffer(10, self.post_render_buffer.buf()),
             ],
             [],
         )
@@ -619,7 +649,9 @@ impl RenderingSystem {
         let layout1 = self.pipeline.layout().set_layouts().get(1).unwrap();
 
         // Bind Hi-Z buffer if available, otherwise use dummy texture
-        let set1 = if let (Some(hiz_view), Some(hiz_sampler)) = (&camera.hiz_view_all_mips, &camera.hiz_sampler) {
+        let set1 = if let (Some(hiz_view), Some(hiz_sampler)) =
+            (&camera.hiz_view_all_mips, &camera.hiz_sampler)
+        {
             DescriptorSet::new(
                 self.gpu.desc_alloc.clone(),
                 layout1.clone(),
@@ -660,10 +692,11 @@ impl RenderingSystem {
             let set2 = DescriptorSet::new(
                 self.gpu.desc_alloc.clone(),
                 layout2.clone(),
-                [WriteDescriptorSet::buffer(
-                    0,
-                    self.stages.clone().slice(i..=i),
-                )],
+                [
+                    WriteDescriptorSet::buffer(0, self.stages.clone().slice(i..=i)),
+                    WriteDescriptorSet::buffer(1, self.post_render_count.clone()),
+                    WriteDescriptorSet::buffer(2, self.post_render_indirect.clone()),
+                ],
                 [],
             )
             .unwrap();
@@ -693,7 +726,8 @@ impl RenderingSystem {
         camera: &crate::camera::Camera,
         hiz_frozen: bool,
     ) {
-        self.occlusion_culling.generate_hiz(&self.gpu, builder, camera, hiz_frozen);
+        self.occlusion_culling
+            .generate_hiz(&self.gpu, builder, camera, hiz_frozen);
     }
 
     // assume pipeline already bound
@@ -786,5 +820,131 @@ impl RenderingSystem {
                 )
                 .unwrap();
         }
+    }
+    pub fn update_mvp2(
+        &mut self,
+        cam: Subbuffer<crate::vs::camera>,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        matrix_data: &Subbuffer<[crate::transform::compute::cs::MatrixData]>,
+        camera: &crate::camera::Camera,
+    ) {
+        builder
+            .bind_pipeline_compute(self.pipeline.clone())
+            .unwrap();
+        let layout_0 = self.pipeline.layout().set_layouts().get(0).unwrap();
+        let set_0 = DescriptorSet::new(
+            self.gpu.desc_alloc.clone(),
+            layout_0.clone(),
+            [
+                WriteDescriptorSet::buffer(0, matrix_data.clone()),
+                WriteDescriptorSet::buffer(1, self.transform_ids_buffer.buf()),
+                WriteDescriptorSet::buffer(2, self.renderer_buffer.buf()),
+                WriteDescriptorSet::buffer(3, self.gpu.empty.clone()),
+                WriteDescriptorSet::buffer(4, self.gpu.empty.clone()),
+                WriteDescriptorSet::buffer(5, self.model_indirect_buffer.buf()),
+                WriteDescriptorSet::buffer(6, self.gpu.empty.clone()),
+                WriteDescriptorSet::buffer(7, self.indirect_commands_buffer.buf()),
+                WriteDescriptorSet::buffer(8, self.indirect_material_vec.buf()),
+                WriteDescriptorSet::buffer(9, self.aabbs_buffer.buf()),
+                WriteDescriptorSet::buffer(10, self.post_render_buffer.buf()),
+            ],
+            [],
+        )
+        .unwrap();
+        let layout1 = self.pipeline.layout().set_layouts().get(1).unwrap();
+
+        // Bind Hi-Z buffer if available, otherwise use dummy texture
+        let set1 = if let (Some(hiz_view), Some(hiz_sampler)) =
+            (&camera.hiz_view_all_mips, &camera.hiz_sampler)
+        {
+            DescriptorSet::new(
+                self.gpu.desc_alloc.clone(),
+                layout1.clone(),
+                [
+                    WriteDescriptorSet::image_view_sampler(
+                        0,
+                        hiz_view.clone(),
+                        hiz_sampler.clone(),
+                    ),
+                    WriteDescriptorSet::buffer(1, cam),
+                    WriteDescriptorSet::buffer(2, camera.uniform_hi_z_info.clone()),
+                    WriteDescriptorSet::buffer(3, camera.uniform.clone()),
+                ],
+                [],
+            )
+            .unwrap()
+        } else {
+            // No Hi-Z available, bind dummy 1x1 texture
+            DescriptorSet::new(
+                self.gpu.desc_alloc.clone(),
+                layout1.clone(),
+                [
+                    WriteDescriptorSet::image_view_sampler(
+                        0,
+                        self.dummy_hiz_view.clone(),
+                        self.dummy_hiz_sampler.clone(),
+                    ),
+                    WriteDescriptorSet::buffer(1, cam),
+                    WriteDescriptorSet::buffer(2, camera.uniform_hi_z_info.clone()),
+                    WriteDescriptorSet::buffer(3, camera.uniform.clone()),
+                ],
+                [],
+            )
+            .unwrap()
+        };
+
+
+        let layout2 = self.pipeline.layout().set_layouts().get(2).unwrap();
+        for i in 9..=10 {
+            let set2 = DescriptorSet::new(
+                self.gpu.desc_alloc.clone(),
+                layout2.clone(),
+                [
+                    WriteDescriptorSet::buffer(0, self.stages.clone().slice(i..=i)),
+                    WriteDescriptorSet::buffer(1, self.post_render_count.clone()),
+                    WriteDescriptorSet::buffer(2, self.post_render_indirect.clone()),
+                ],
+                [],
+            )
+            .unwrap();
+
+            builder
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Compute,
+                    self.pipeline.layout().clone(),
+                    0,
+                    (set_0.clone(), set1.clone(), set2.clone()),
+                )
+                .unwrap();
+            unsafe {
+                builder
+                    .dispatch_indirect(self.dispatch.clone().slice(i..=i))
+                    .unwrap();
+            }
+        }
+        let set2 = DescriptorSet::new(
+			self.gpu.desc_alloc.clone(),
+			layout2.clone(),
+			[
+				WriteDescriptorSet::buffer(0, self.stages.clone().slice(11..=11)),
+				WriteDescriptorSet::buffer(1, self.post_render_count.clone()),
+				WriteDescriptorSet::buffer(2, self.gpu.empty.clone()),
+			],
+			[],
+		).unwrap();
+
+		builder
+			.bind_descriptor_sets(
+				PipelineBindPoint::Compute,
+				self.pipeline.layout().clone(),
+				0,
+				(set_0.clone(), set1.clone(), set2.clone()),
+			)
+			.unwrap();
+		unsafe {
+			builder
+				.dispatch_indirect(self.post_render_indirect.clone())
+				.unwrap();
+		}
     }
 }

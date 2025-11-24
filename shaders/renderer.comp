@@ -19,7 +19,11 @@ struct VkDrawIndexedIndirectCommand {
     int vertexOffset;
     uint firstInstance;
 };
-
+struct DispatchIndirectCommand {
+    uint num_groups_x;
+    uint num_groups_y;
+    uint num_groups_z;
+};
 struct ModelIndirect {
     uint offset;
     uint count;
@@ -46,12 +50,20 @@ struct RenderData {
     uint mat_id;
 };
 
+struct PostRenderData {
+    uint mesh_id;
+    uint t_id;
+};
+
 layout(set = 0, binding = 1) buffer TransformIDs {
     RenderData transform_ids[];
 };
 
 layout(set = 0, binding = 2) buffer Renderers {
     Renderer renderers[];
+};
+layout(set = 0, binding = 10) buffer postRenderBuffer {
+    PostRenderData pr[];
 };
 
 layout(set = 0, binding = 3) buffer RendererInits {
@@ -105,6 +117,14 @@ layout(set = 2, binding = 0) uniform Stage {
     uint pass;
 };
 
+layout(set = 2, binding = 1) buffer postRenderInc {
+    uint num_post_render;
+};
+
+layout(set = 2, binding = 2) buffer postRenderIndirect {
+    DispatchIndirectCommand indirect_post_render[];
+};
+
 void pass0_localScan();
 void pass1_globalScan();
 void pass2_addGlobal();
@@ -122,16 +142,20 @@ bool isHiZAvailable() {
     return true;
 }
 
+const uint VISIBLE = 1;
+const uint OCCLUDED = 0;
+const uint CULLED = 2;
+
 // Occlusion test function
-bool isOccluded(uint meshId, uint transformId) {
+uint isOccluded(uint meshId, uint transformId) {
     // Safety check: if Hi-Z not available, don't cull anything
     if (!isHiZAvailable()) {
-        return false;
+        return VISIBLE;
     }
 
     // Bounds check for AABB array
     if (meshId >= aabbs.length()) {
-        return false; // Don't cull if we don't have AABB data
+        return VISIBLE; // Don't cull if we don't have AABB data
     }
     AABB bbox = aabbs[meshId];
     vec3 center = (bbox.min.xyz + bbox.max.xyz) * 0.5;
@@ -178,12 +202,12 @@ bool isOccluded(uint meshId, uint transformId) {
 
     // Camera is inside or intersecting the AABB - don't cull
     if (anyInFront && anyBehind) {
-        return false;
+        return VISIBLE;
     }
 
     // All corners behind camera
     if (!anyInFront) {
-        return true; // Cull it
+        return CULLED; // Cull it
     }
 
     // Clamp to screen
@@ -201,7 +225,7 @@ bool isOccluded(uint meshId, uint transformId) {
 
     // If object covers no pixels, it's effectively culled
     if (maxDim <= 0.0) {
-        return true;
+        return CULLED;
     }
 
     int numMips = textureQueryLevels(hizBuffer);
@@ -216,7 +240,7 @@ bool isOccluded(uint meshId, uint transformId) {
     // float bias = max(0.00001, occluderDepth * 0.0001); // 0.01% of depth value
     // float bias = 1.0 + 0.00001; // Fixed small bias
     bool visible = minDepth <= occluderDepth;
-    return !visible;
+    return visible ? VISIBLE : OCCLUDED;
 }
 
 // case 0: apply updates
@@ -340,9 +364,21 @@ void main() {
                     // mat3 normal = inverse(transpose(mat3(model_matrix)));
                     for (uint i = 0; i < mc.count; ++i) {
                         // Occlusion test: only count visible meshes
-                        if (isOccluded(mc.offset + i, r.t_idx)) {
+                        uint visibility = isOccluded(mc.offset + i, r.t_idx);
+                        if (visibility == OCCLUDED) {
+                            uint pr_idx = atomicAdd(num_post_render, 1);
+                            PostRenderData p;
+                            p.mesh_id = mc.offset + i;
+                            p.t_id = r.t_idx;
+                            pr[pr_idx] = p;
                             continue;
                         }
+                        if (visibility == CULLED) {
+                            continue;
+                        }
+                        // if (isOccluded(mc.offset + i, r.t_idx)) {
+                        //     continue;
+                        // }
                         // if (closeness(mc.offset + i, r.t_idx) > 10.0) {
                         //     continue;
                         // }
@@ -358,6 +394,40 @@ void main() {
             }
         }
         break;
+        case 5:
+        {
+            switch (pass) {
+                case 0:
+                {
+                    indirect_post_render[0].num_groups_x = uint((num_post_render + 63) / 64);
+                    indirect_post_render[0].num_groups_y = 1;
+                    indirect_post_render[0].num_groups_z = 1;
+                }
+                break;
+                case 1:
+                {
+                    indirect[idx].instanceCount = 0;
+                }
+                break;
+                case 2:
+                {
+                    uint pr_idx = idx;
+                    if (pr_idx >= num_post_render) {
+                        break;
+                    }
+                    PostRenderData prd = pr[pr_idx];
+                    uint visibility = isOccluded(prd.mesh_id, prd.t_id);
+                    if (visibility == OCCLUDED || visibility == CULLED) {
+                        break;
+                    }
+                    uint mvp_idx = indirect[prd.mesh_id].firstInstance +
+                            atomicAdd(indirect[prd.mesh_id].instanceCount, 1);
+                    transform_ids[mvp_idx].t_id = prd.t_id;
+                    transform_ids[mvp_idx].mat_id = material_ids[prd.mesh_id];
+                }
+                break;
+            }
+        }
     }
 }
 

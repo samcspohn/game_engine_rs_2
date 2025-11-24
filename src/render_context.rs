@@ -347,6 +347,40 @@ impl RenderContext {
         // This includes copying depth to Hi-Z mip 0, then generating the mip pyramid
         rendering_system.generate_hiz(&mut builder, &camera, hiz_frozen);
 
+        // 2nd Pass: render objects incorrectly culled in the first pass
+        rendering_system.update_mvp2(camera.uniform.clone(), &mut builder, matrix_data, &camera);
+
+        builder.begin_rendering(RenderingInfo {
+			color_attachments: vec![Some(RenderingAttachmentInfo {
+				load_op: AttachmentLoadOp::Load,
+				store_op: AttachmentStoreOp::Store,
+				clear_value: None,
+				..RenderingAttachmentInfo::image_view(camera.image_view.clone())
+			})],
+			depth_attachment: Some(RenderingAttachmentInfo {
+				load_op: AttachmentLoadOp::Load,
+				store_op: AttachmentStoreOp::Store,
+				clear_value: None,
+				..RenderingAttachmentInfo::image_view(camera.depth_view.clone())
+			}),
+			..RenderingInfo::default()
+		})
+		.unwrap()
+		.set_viewport(0, [self.viewport.clone()].into_iter().collect())
+		.unwrap()
+		.bind_pipeline_graphics(self.pipeline.clone())
+		.unwrap();
+        rendering_system.draw(
+			&mut builder,
+			assets,
+			self.pipeline.clone(),
+			camera.uniform.clone(),
+			matrix_data,
+		);
+        builder.end_rendering().unwrap();
+
+        rendering_system.generate_hiz(&mut builder, &camera, hiz_frozen);
+
         // We leave the render pass.
         self.command_buffer = Some(builder.build().unwrap());
     }
